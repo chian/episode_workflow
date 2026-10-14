@@ -9,10 +9,20 @@ import math
 from typing import Any, Mapping
 
 from ...method_loop import ClosedRecord
+from ...task_executors.scenario_metrics.conditional import is_duration_relation
+from ...task_executors.scenario_metrics.evaluate import output_meets_contract, exposure_outputs_agree
 
 
 def identity(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def scenario_relation_key(row):
+    if row.get("kind") == "feature":
+        return ("feature", row["name"])
+    if row.get("kind") == "dependency":
+        return ("dependency", row["parameter"])
+    return ("group", row["group_id"])
 
 
 def finite(value: Any, name: str) -> float:
@@ -37,7 +47,7 @@ def condensed_diagnostics(diagnostics):
     groups = {}
     for diagnostic in diagnostics:
         summary = {k: v for k, v in diagnostic.items()
-                   if k not in {"proposal", "diagnostic_id", "model_call"}}
+                   if k not in {"proposal", "diagnostic_id", "model_call", "unreviewed_candidates"}}
         proposal = diagnostic.get("proposal")
         if isinstance(proposal, Mapping):
             summary["received_fields"] = sorted(proposal)
@@ -56,6 +66,9 @@ def cited_assessment_evidence(assessment):
     """Distinguish the judgment's cited basis from all material it considered."""
     references = {key for criterion in assessment["review"]["criteria"].values()
                   for key in criterion["evidence"]}
+    references.update(assessment["review"].get("supporting_evidence", ()))
+    references.update(assessment["review"].get("contradicting_evidence", ()))
+    references.update(assessment["review"].get("invalid_evidence", ()))
     constraint = assessment["review"].get("request_constraint")
     if constraint is not None:
         references.update(constraint["evidence"])
@@ -66,6 +79,81 @@ def assessment_summary(assessment):
     return {**{k: v for k, v in assessment.items() if k not in {"key", "evidence", "assessment_basis_version"}},
             "evidence": cited_assessment_evidence(assessment),
             "considered_evidence_count": len(assessment["evidence"])}
+
+
+def assumption_claim(assessment):
+    """Identify the computation's claim separately from its evidence review."""
+    return identity({k: assessment[k] for k in ("subject", "field", "value", "unit", "statement")})
+
+
+def assumption_matches(record, key, assessment):
+    if not assessment:
+        return False
+    version = record.get("assumption_versions", {}).get(key)
+    if version is None or version == assessment.get("version"):
+        return True
+    claim = record.get("assumption_claims", {}).get(key)
+    return claim is not None and claim == assumption_claim(assessment)
+
+
+def current_support(record, assessments, *, metric=None, ledger=None):
+    """Evidence quality is a credit/report property, not permission to compute."""
+    if (not record.get("model_review", {}).get("admit", True)
+            or not record.get("model_review", {}).get("completed", True)):
+        return 0.0
+    if metric is not None and "metric_support" in record:
+        return current_support(record["metric_support"].get(metric, {}), assessments, ledger=ledger)
+    if not current_scenario_links(record, ledger):
+        return 0.0
+    if record.get("support_issues"):
+        return 0.0
+    versions = record.get("assumption_versions", {})
+    keys = record.get("assumption_keys", versions)
+    return min((assessments.get(k, {}).get("reasonableness", 0)
+                if assumption_matches(record, k, assessments.get(k)) else 0
+                for k in keys), default=0)
+
+
+def current_computation(record, assessments, metric, *, ledger=None):
+    """A computed conditional consequence is distinct from its evidential support."""
+    row = record.get("metrics", record.get("output", {})).get(metric, {})
+    if not isinstance(row, Mapping) or row.get("status") != "calculated":
+        return False
+    value = row.get("value")
+    if not (is_duration_relation(row) or (row.get("limit") == "unbounded" and value is None) or
+            (row.get("limit") == "finite" and type(value) in (int, float) and math.isfinite(value))):
+        return False
+    if not output_meets_contract(row, record.get("output_contracts", {}).get(metric)):
+        return False
+    dependency = record.get("metric_support", {}).get(metric, record)
+    return current_premises(dependency, assessments, ledger=ledger)
+
+
+def current_scenario_links(record, ledger):
+    links = record.get("scenario_parameter_links", ())
+    if not links:
+        return True
+    if ledger is None:
+        return False
+    from .scenario_sharing import shared_assumptions
+    for link in links:
+        if not any(a["key"] == link["assumption_key"] and identity(row) == link["relation_version"]
+                   for a, row in shared_assumptions(ledger, link["target_subject"])):
+            return False
+    return True
+
+
+def current_premises(record, assessments, *, ledger=None):
+    """Claim changes and refutations invalidate use; weak support alone does not."""
+    if record.get("invalidated_dependencies"):
+        return False
+    if not current_scenario_links(record, ledger):
+        return False
+    for key in record.get("assumption_keys", record.get("assumption_versions", {})):
+        current = assessments.get(key)
+        if not assumption_matches(record, key, current) or current.get("review", {}).get("verdict") == "contradicted":
+            return False
+    return True
 
 
 def evidence_summary(evidence):
@@ -105,7 +193,7 @@ class Fact(ClosedRecord):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f"Fact.{name} is required")
         object.__setattr__(self, "value", finite(self.value, self.field))
-        if self.kind not in {"user_assumption", "request_constraint", "source_observation", "source_model_parameter", "model_assumption", "derived"}:
+        if self.kind not in {"user_assumption", "request_constraint", "scenario_constraint", "source_observation", "source_model_parameter", "model_assumption", "derived"}:
             raise ValueError("Unknown fact kind")
         if any(not isinstance(getattr(self, name), str) for name in ("source", "quote", "context")):
             raise ValueError("Fact source, quote and context must be text")
@@ -134,12 +222,11 @@ class Fact(ClosedRecord):
 @dataclass(frozen=True)
 class ResearchMessage(ClosedRecord):
     objective: str
-    focus: tuple[str, ...]
     subjects: tuple[str, ...]
     proposal: Mapping[str, Any] = dataclass_field(default_factory=dict)
 
     def as_record(self):
-        return {"objective": self.objective, "focus": list(self.focus), "subjects": list(self.subjects),
+        return {"objective": self.objective, "subjects": list(self.subjects),
                 "proposal": dict(self.proposal)}
 
 
@@ -148,10 +235,11 @@ class Credit(ClosedRecord):
     identities: tuple[tuple[str, str], ...] = ()
     evaluated: bool = True
     qualities: tuple[tuple[str, str, float], ...] = ()
+    quality_resolution: float | None = None
 
     def as_record(self):
         return {"identities": [list(pair) for pair in self.identities], "evaluated": self.evaluated,
-                "qualities": [list(row) for row in self.qualities]}
+                "qualities": [list(row) for row in self.qualities], "quality_resolution": self.quality_resolution}
 
 
 @dataclass(frozen=True)
@@ -167,6 +255,10 @@ class ResearchResult(ClosedRecord):
     scenarios: tuple[Mapping[str, Any], ...] = ()
     diagnostics: tuple[Mapping[str, Any], ...] = ()
     calculations: tuple[Mapping[str, Any], ...] = ()
+    reading_attempts: tuple[Mapping[str, Any], ...] = ()
+    source_event_types: tuple[Mapping[str, Any], ...] = ()
+    source_target_relationships: tuple[Mapping[str, Any], ...] = ()
+    scenario_parameter_relations: tuple[Mapping[str, Any], ...] = ()
 
     def as_record(self):
         return {"facts": [f.as_record() for f in self.facts],
@@ -174,28 +266,22 @@ class ResearchResult(ClosedRecord):
                 "issues": list(self.issues), "evaluated": self.evaluated,
                 "stop_reason": self.stop_reason, "evidence": list(self.evidence),
                 "assumptions": list(self.assumptions), "scenarios": list(self.scenarios),
-                "diagnostics": list(self.diagnostics), "calculations": list(self.calculations)}
+                "diagnostics": list(self.diagnostics), "calculations": list(self.calculations),
+                "reading_attempts": list(self.reading_attempts),
+                "source_event_types": list(self.source_event_types),
+                "source_target_relationships": list(self.source_target_relationships),
+                "scenario_parameter_relations": list(self.scenario_parameter_relations)}
 
     def audit_identifiers(self):
         return tuple(f.key for f in self.facts)
 
-    def credit(self, focus, *, scientific=False, subjects=None):
+    def credit(self, focus, *, scientific=False, subjects=None, outputs=None):
         if scientific:
             from .assumptions import scientific_credit
-            return scientific_credit(self, focus, subjects=subjects)
-        pairs = {(f.field, f.credit_key) for f in self.facts if f.field in focus}
-        pairs.update((field, identity([e["subject"], field, " ".join(e["quote"].split())]))
-                     for e in self.evidence for field in e.get("fields", ()) if field in focus)
-        for estimate in self.estimates:
-            for name, output in estimate["metrics"].items():
-                column = f"{estimate['subject']}::{name}"
-                column = column if column in focus else name
-                if column in focus and output["status"] == "calculated":
-                    pairs.add((column, identity([estimate["subject"], name, output["value"], output["limit"]])))
-            for name, output in estimate.get("derived_parameters", {}).items():
-                if name in focus:
-                    pairs.add((name, identity([estimate["subject"], name, output["value"]])))
-        return Credit(tuple(sorted(pairs)), self.evaluated)
+            return scientific_credit(self, focus, subjects=subjects, outputs=outputs)
+        # A record cannot judge its contribution without the invoking contract.
+        # Acquisition bindings perform that mandatory assessment before projection.
+        return Credit(evaluated=self.evaluated)
 
     def synthesis(self):
         return {"evidence": [f.semantic_record() for f in self.facts],
@@ -204,7 +290,10 @@ class ResearchResult(ClosedRecord):
                 "findings": list(self.findings), "unresolved": list(self.issues),
                 "completion": self.stop_reason, "assumptions": [{k: v for k, v in a.items() if k != "key"} for a in self.assumptions],
                 "qualitative_evidence": list(self.evidence), "scenarios": list(self.scenarios),
-                "diagnostics": list(self.diagnostics)}
+                "diagnostics": list(self.diagnostics), "reading_attempts": list(self.reading_attempts),
+                "source_event_types": list(self.source_event_types),
+                "source_target_relationships": list(self.source_target_relationships),
+                "scenario_parameter_relations": list(self.scenario_parameter_relations)}
 
 
 class Ledger:
@@ -221,6 +310,10 @@ class Ledger:
         self.scenarios = {}
         self.diagnostics = []
         self.calculations = {}
+        self.reading_attempts = {}
+        self.source_event_types = {}
+        self.source_target_relationships = {}
+        self.scenario_parameter_relations = {}
         self.merge(inherited)
 
     def merge(self, result):
@@ -236,10 +329,16 @@ class Ledger:
                             del self.estimates[previous_key]
                             break
             key = identity([estimate["subject"], estimate["parameters"], estimate["conditions"],
-                            estimate.get("assumption_versions", {}), model])
+                            estimate.get("assumption_versions", {}), model,
+                            estimate.get("model_review", {}).get("completed", True)])
             previous = self.estimates.get(key)
             if previous:
                 estimate = {**previous, **estimate, "metrics": {**previous["metrics"], **estimate["metrics"]},
+                    "scenario_parameter_links": list({identity(row): row for row in
+                        (*previous.get("scenario_parameter_links", ()), *estimate.get("scenario_parameter_links", ()))}.values()),
+                    "metric_support": {**previous.get("metric_support", {}), **estimate.get("metric_support", {})},
+                    "metric_dependencies": {**previous.get("metric_dependencies", {}), **estimate.get("metric_dependencies", {})},
+                    "output_contracts": {**previous.get("output_contracts", {}), **estimate.get("output_contracts", {})},
                     "calculation_versions": list(dict.fromkeys([*previous.get("calculation_versions", ()),
                                                                 *estimate.get("calculation_versions", ())]))}
             self.estimates[key] = estimate
@@ -250,6 +349,14 @@ class Ledger:
         self.scenarios.update((s["subject"], s) for s in result.scenarios)
         self.diagnostics.extend(d for d in result.diagnostics if d not in self.diagnostics)
         self.calculations.update((c["version"], c) for c in result.calculations)
+        self.reading_attempts.update((identity(a), a) for a in result.reading_attempts)
+        self.source_event_types.update((row["type_id"], row) for row in result.source_event_types)
+        self.source_target_relationships.update(
+            ((row["source"], row["source_subject"], row["target_subject"], row["parameter"]), row)
+            for row in result.source_target_relationships)
+        self.scenario_parameter_relations.update(
+            (scenario_relation_key(row), row)
+            for row in result.scenario_parameter_relations)
 
     def options(self):
         return {f"fact:{i}": f for i, f in enumerate(self.facts.values(), 1)}
@@ -270,15 +377,38 @@ class Ledger:
         return ResearchResult(tuple(self.facts.values()), tuple(self.estimates.values()),
                               tuple(self.findings), tuple(self.issues), evidence=tuple(self.evidence.values()),
                               assumptions=tuple(self.assumptions.values()), scenarios=tuple(self.scenarios.values()),
-                              diagnostics=tuple(self.diagnostics), calculations=tuple(self.calculations.values()), **kwargs)
+                              diagnostics=tuple(self.diagnostics), calculations=tuple(self.calculations.values()),
+                              reading_attempts=tuple(self.reading_attempts.values()),
+                              source_event_types=tuple(self.source_event_types.values()),
+                              source_target_relationships=tuple(self.source_target_relationships.values()),
+                              scenario_parameter_relations=tuple(self.scenario_parameter_relations.values()), **kwargs)
 
 
 def compatible_estimates(left, right):
     """Join tool outputs only within an explicitly named, compatible model."""
-    for name in ("parameters", "conditions", "assumption_versions"):
+    # Check both records, including duplicate output names that a dict merge hides.
+    model_ids = {}
+    for estimate in (left, right):
+        if not exposure_outputs_agree(estimate["metrics"]):
+            return None
+        for row in estimate["metrics"].values():
+            if row.get("status") == "calculated" and row.get("model_id"):
+                background = row["background"]
+                if model_ids.setdefault(background, row["model_id"]) != row["model_id"]:
+                    return None
+    if (left.get("support_issues", []) != right.get("support_issues", []) or
+            left.get("model_review", {}).get("admit", True) != right.get("model_review", {}).get("admit", True) or
+            left.get("model_review", {}).get("completed", True) != right.get("model_review", {}).get("completed", True)):
+        return None
+    for name in ("parameters", "conditions"):
         if any(left.get(name, {})[k] != value for k, value in right.get(name, {}).items()
                if k in left.get(name, {})):
             return None
+    for key, version in right.get("assumption_versions", {}).items():
+        if key in left.get("assumption_versions", {}) and left["assumption_versions"][key] != version:
+            claim = left.get("assumption_claims", {}).get(key)
+            if claim is None or claim != right.get("assumption_claims", {}).get(key):
+                return None
     parameters = {**left["parameters"], **right["parameters"]}
     conditions = {**left["conditions"], **right["conditions"]}
     from ...task_executors.scenario_metrics.evaluate import evaluate_parameters
@@ -287,11 +417,20 @@ def compatible_estimates(left, right):
         return None
     support = {a["key"]: a for a in (*left.get("assumption_support", ()), *right.get("assumption_support", ()))}
     return {**left, **right, "parameters": parameters, "conditions": conditions,
+            "scenario_parameter_links": list({identity(row): row for row in
+                (*left.get("scenario_parameter_links", ()), *right.get("scenario_parameter_links", ()))}.values()),
             "metrics": {**left["metrics"], **right["metrics"]},
+            "metric_support": {**left.get("metric_support", {}), **right.get("metric_support", {})},
+            "metric_dependencies": {**left.get("metric_dependencies", {}), **right.get("metric_dependencies", {})},
+            "output_contracts": {**left.get("output_contracts", {}), **right.get("output_contracts", {})},
+            "derived_dependencies": {**left.get("derived_dependencies", {}), **right.get("derived_dependencies", {})},
             "input_provenance": {**left.get("input_provenance", {}), **right.get("input_provenance", {})},
             "derived_parameters": {**left.get("derived_parameters", {}), **right.get("derived_parameters", {})},
             "assumption_versions": {**left.get("assumption_versions", {}), **right.get("assumption_versions", {})},
+            "assumption_claims": {**left.get("assumption_claims", {}), **right.get("assumption_claims", {})},
             "assumption_keys": list(dict.fromkeys([*left.get("assumption_keys", ()), *right.get("assumption_keys", ())])),
+            "invalidated_dependencies": list(dict.fromkeys([*left.get("invalidated_dependencies", ()),
+                                                             *right.get("invalidated_dependencies", ())])),
             "assumption_support": list(support.values()),
             "reasonableness": min(left.get("reasonableness", 0), right.get("reasonableness", 0)),
             "calculation_versions": list(dict.fromkeys([*left.get("calculation_versions", ()), *right.get("calculation_versions", ())])),

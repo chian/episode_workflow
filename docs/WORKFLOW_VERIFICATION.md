@@ -105,7 +105,7 @@ Model basis: [Bazant and Bush, Eqs. 3-7](https://thales.mit.edu/bush/wp-content/
   0.5%, subject to the same assumptions and rounded inputs.
 - PMC and ScienceDirect yielded identical Cq values because they contain the
   same paper and event. This is not replication across independent cases.
-- Choir and influenza runs did not produce accepted calibrations or bounds.
+- Choir and second-disease runs did not produce accepted calibrations or bounds.
   There is no supported cross-case agreement claim, nor a real-data comparison
   of the steady, transient, and jet-corrected model paths.
 
@@ -113,9 +113,9 @@ Model basis: [Bazant and Bush, Eqs. 3-7](https://thales.mit.edu/bush/wp-content/
 
 | Requirement | Current evidence | Status |
 | --- | --- | --- |
-| Runtime disease, scenario, and setting inputs | Parameterized synthetic runs; live COVID-19 success and influenza evidence-poor failure | Verified within this coverage |
+| Runtime disease, scenario, and setting inputs | Parameterized synthetic runs; live first-disease success and second-disease evidence-poor failure | Verified within this coverage |
 | Self-contained search/retrieve path | Local episode binding, Firecrawl, Jev, and Argo clients; isolated checkout and import tests | Verified without sibling imports or third-party Python packages |
-| Real runtime acquisition | Live COVID-19/choir and restaurant runs returned retrieved papers and source-backed extraction reports | Verified for these runtime inputs |
+| Real runtime acquisition | Live choir and restaurant runs returned retrieved papers and source-backed extraction reports | Verified for these runtime inputs |
 | No-auth local Argo shim | Live completion smoke check and real extraction in the CLI runs | Verified with the checkout's local configuration |
 | Exact spans, refs, normalization, and event separation | Adversarial extraction tests, independent duration checks, event-isolation tests, credited-event context | Offline checks pass; live rejection of unsupported evidence observed |
 | Outbreak-derived Cq and final bound | Strict live restaurant test and independent recomputation from retained source-backed inputs | Verified for one published outbreak |
@@ -130,7 +130,7 @@ The initial choir runs used this command with real configured providers, no mock
 no supplied outbreak document, and no injected outbreak quantities:
 
 ```bash
-.venv-standalone/bin/python -I -S -B . COVID-19 \
+.venv-standalone/bin/python -I -S -B . "$DISEASE_OF_INTEREST" \
   --setting choir --search-limit 3 \
   --target-scenario '{"removal_capacity_m3_s":0.5,"breathing_flow_m3_s":0.0001,"mask_penetration":1,"risk_tolerance":0.1}'
 ```
@@ -141,36 +141,36 @@ calibration logic.
 
 The ignored `.artifacts/live/` directory retains the complete JSON reports.
 
-- `covid-choir-v1.json`: failed because the extraction prompt did not specify
+- First-disease choir run v1: failed because the extraction prompt did not specify
   exact normalized count-unit labels. Added the per-field normalized-unit
   contract without relaxing validation.
-- `covid-choir-v2.json`: count, duration, behavior, and neutral-scaling children
+- First-disease choir run v2: count, duration, behavior, and neutral-scaling children
   passed for two retrieved sources. All three attempted calibrations failed;
   removal capacity was not credited. Some fallback extractions used unsupported
   `cfm` or `m3/min` units; another cited a non-exact span. This run started before
   the later credit-rollup and event-context corrections and retains its original
   scores.
-- `covid-restaurant-v3.json`: used the same command with `--setting restaurant`.
+- First-disease restaurant run v3: used the same command with `--setting restaurant`.
   Exact-span validation rejected review quotations joined with ellipses. The
   audit also found exposed-count/attendance ambiguity and a circular proposed
   transmissibility factor. Extraction/review prompts were tightened.
-- `covid-restaurant-v4.json`: returned a numerically passed report, but the audit
-  rejected its unsolicited Omicron-to-Delta scaling. This is **not** counted as
+- First-disease restaurant run v4: returned a numerically passed report, but the audit
+  rejected its unsolicited variant scaling. This is **not** counted as
   a verified calibration. Fixed the control flow so default runs retain the
   outbreak's own transmissibility scale; sourced rescaling is explicitly opt-in.
   Added regressions for both modes and missing required scaling evidence.
-- `influenza-aircraft-v1.json`: used runtime disease `influenza`, setting
-  `aircraft`, and search limit 2. Real discovery retrieved an inflight influenza
+- Second-disease aircraft run v1: used a separate runtime disease input, setting
+  `aircraft`, and search limit 2. Real discovery retrieved an inflight outbreak
   analysis and follow-up sources. Calibration returned a structured failure:
   event duration and applicable removal/behavior inputs were unavailable.
   Applicability review rejected a hypothetical office ventilation rate and
   laboratory respirator test values as incompatible with the aircraft event.
   This run began before the default-scaling control-flow correction.
-- `covid-restaurant-v5.json`: ran the strict live integration test with corrected
+- First-disease restaurant run v5: ran the strict live integration test with corrected
   native scaling. It failed on non-exact extraction quotations; the failed
   report is retained. Added one bounded same-source span correction request,
   complete revalidation, retained diagnostics, and adversarial retry tests.
-- `covid-restaurant-v6.json`: strict live test passed in 198 seconds. The
+- First-disease restaurant run v6: strict live test passed in 198 seconds. The
   successful source reports describe the same published R2 event at PMC and
   ScienceDirect, not two independent outbreaks. One non-exact count quotation
   was corrected by the bounded retry; the rejected response and exact accepted
@@ -200,7 +200,7 @@ unknown compatibility, and fabricated spans. Semantic applicability is still
 an LLM judgment; exact quotations alone are not scientific validation.
 
 Second-disease acquisition and evidence-poor failure were exercised with the
-influenza run. This verifies handling of that runtime input, not that every
+second-disease run. This verifies handling of that runtime input, not that every
 disease or outbreak can supply enough evidence for a numerical estimate.
 Calibration remains conditional on the source's event-model assumptions and
 the selected well-mixed model. Broader numerical validation, uncertainty
@@ -218,11 +218,11 @@ Latest live result: 63 tests run, all passed, none skipped.
 The successful live invocation was:
 
 ```bash
-EPISODIC_TEST_DISEASE_NAME=COVID-19 \
+EPISODIC_TEST_DISEASE_NAME="$DISEASE_OF_INTEREST" \
 EPISODIC_TEST_SETTING=restaurant \
 EPISODIC_TEST_SEARCH_LIMIT=3 \
 EPISODIC_TEST_TARGET_SCENARIO_JSON='{"removal_capacity_m3_s":0.5,"breathing_flow_m3_s":0.0001,"mask_penetration":1,"risk_tolerance":0.1}' \
-EPISODIC_TEST_REPORT_PATH=.artifacts/live/covid-restaurant-v6.json \
+EPISODIC_TEST_REPORT_PATH="$NEW_REPORT_PATH" \
 .venv-standalone/bin/python -I -S -B scripts/check.py --live
 ```
 

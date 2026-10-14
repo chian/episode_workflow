@@ -17,7 +17,7 @@ from episodic_workflow.case_reports.research.assumptions import assess_assumptio
 from episodic_workflow.task_executors.scenario_metrics.evaluate import UNITS, DEFAULT_METRICS
 from episodic_workflow.task_executors.evidence_extraction.argo import parse_json_object
 from episodic_workflow.method_loop import Context, EpisodeGoal, EpisodeTree
-from episodic_workflow.tests.test_research import run_synthetic, AdaptiveAgent, supported_review, SOURCE_TEXT, REQUEST, METRICS, VALUES, CONDITIONS
+from episodic_workflow.tests.test_research import run_synthetic, AdaptiveAgent, supported_review, synthetic_information_review, SOURCE_TEXT, REQUEST, METRICS, VALUES, CONDITIONS
 from episodic_workflow.tests.report_assertions import assert_admitted_research_provenance
 
 
@@ -173,7 +173,7 @@ class ApprovedTreeTests(unittest.TestCase):
         self.assertTrue({"propose_strategy_query", "propose_page_child", "review_research_evidence",
                          "review_scenario_scope", "review_research_model", "synthesize_research_findings"} <= observed)
 
-    def test_inferred_candidate_reaches_tools_only_after_evidence_linked_review(self):
+    def test_inferred_candidate_retains_evidence_linked_review_when_calculated(self):
         base = AdaptiveAgent()
         def agent(request):
             response = base(request)
@@ -218,16 +218,13 @@ class ApprovedTreeTests(unittest.TestCase):
         self.assertTrue(report.data["assumption_assessments"])
         self.assertTrue(report.data["calculations"])
         self.assertLess(report.data["control"]["model_calls"], 200)
-        self.assertTrue(any("episode_model_call_budget_exhausted" in issue for issue in report.data["unresolved"]))
         investigation = record.unit_records[0].child
         self.assertEqual(investigation.goal.as_record()["result_contract"]["operational_limits"]["requested_model_calls"], 60)
         for parent in walk(record):
             for unit in parent.unit_records:
                 if not unit.child:
                     continue
-                limits = unit.child.goal.as_record()["result_contract"]["operational_limits"]
-                usage = unit.episode_update.report.as_record()["completion"]["resources"]
-                self.assertLessEqual(usage["model_calls_used"], limits["model_call_allowance"])
+                self.assertNotIn("resources", unit.episode_update.report.as_record()["completion"])
         for request in base.requests:
             resources = request["context"]["operational_resources"]
             self.assertGreaterEqual(resources["model_calls_remaining"], 0)
@@ -242,14 +239,21 @@ class ApprovedTreeTests(unittest.TestCase):
             elif request["operation"] == "propose_investigation_strategy":
                 response["child_model_calls"] = 1000
             return response
-        _, (record, _) = run_synthetic(agent, ResearchLimits(max_model_calls=20))
+        _, (record, report) = run_synthetic(agent, ResearchLimits(max_model_calls=20))
         investigation = record.unit_records[0].child
         strategy = investigation.unit_records[0].child
         granted = strategy.goal.as_record()["result_contract"]["operational_limits"]
         self.assertEqual(granted["requested_model_calls"], 1000)
         self.assertLess(granted["model_call_allowance"], 8)
-        usage = investigation.unit_records[0].episode_update.report.as_record()["completion"]["resources"]
-        self.assertLessEqual(usage["model_calls_used"], granted["model_call_allowance"])
+        completion_past_deadline = []
+        for attempt in report.data["model_attempts"]:
+            deadline = attempt["request"]["context"]["operational_resources"]["model_call_deadline"]
+            self.assertLessEqual(attempt["call"], 20)
+            if attempt["phase"] == "work":
+                self.assertLessEqual(attempt["call"], deadline)
+            elif attempt["call"] > deadline:
+                completion_past_deadline.append(attempt)
+        self.assertTrue(completion_past_deadline)
 
     def test_invalid_child_allowance_does_not_consume_a_selected_source(self):
         for value in (None, True, 0, -1, "3", 1.5):
@@ -346,13 +350,11 @@ class ApprovedTreeTests(unittest.TestCase):
             self.assertEqual(focus["minItems"], 1)
             self.assertTrue({FIELD, "well_mixed", "critical_distance_m"} <= set(focus["items"]["enum"]))
             choices = properties["facts"]["items"]
-            self.assertEqual(set(choices["enum"]) if choices else set(), set(request["admitted_facts"]))
+            expected = {*request["admitted_facts"], *(k for k, a in request["assumption_options"].items() if a["value"] is not None)}
+            self.assertEqual(set(choices["enum"]) if choices else set(), expected)
             self.assertEqual(properties["child_model_calls"]["minimum"], 1)
-            costs = request["context"]["model_call_costs"]
-            self.assertIn("extraction", costs["reading_unit"])
-            self.assertIn("mandatory evidence-review", costs["reading_unit"])
-            self.assertIn("invoking parent", costs["child_return"])
-            self.assertIn("not a number of searches", costs["interpretation"])
+            self.assertNotIn("model_call_costs", request["context"])
+            self.assertIn("not retrieved evidence", request["context"]["implemented_model"]["interpretation"])
 
     def test_invalid_root_focus_reports_offending_fields(self):
         def agent(request):
@@ -626,7 +628,8 @@ class ApprovedTreeTests(unittest.TestCase):
         for criterion in supported["then"]["properties"]["criteria"]["properties"].values():
             self.assertEqual(criterion["properties"]["grade"]["const"], 2)
         self.assertIn("do not inflate grades", requests[0]["instruction"])
-        self.assertFalse(result.assumptions)
+        self.assertEqual(result.assumptions[0]["review"]["verdict"], "unassessed")
+        self.assertEqual(result.assumptions[0]["reasonableness"], 0)
         self.assertFalse(result.evaluated)
         self.assertIn("'support': 1", result.diagnostics[0]["why"])
 
@@ -647,7 +650,8 @@ class ApprovedTreeTests(unittest.TestCase):
             source.candidates[source.candidate_key(candidate)] = candidate
         result = source.assess(ResearchResult())
         self.assertTrue(result.evaluated)
-        self.assertEqual([a["field"] for a in result.assumptions], [FIELD])
+        self.assertEqual([a["field"] for a in result.assumptions if a["review"].get("completed", True)], [FIELD])
+        self.assertEqual([a["field"] for a in result.assumptions if not a["review"].get("completed", True)], [other])
         qualities = {field: value for field, _, value in result.credit(source.focus, scientific=True).qualities}
         self.assertEqual(qualities, {FIELD: 1, other: 0})
         self.assertTrue(any(d["category"] == "malformed_json" for d in result.diagnostics))
@@ -854,6 +858,8 @@ class ReadingBindingTests(unittest.TestCase):
                 if len(reviews) == 1:
                     return parse_json_object('{"decisions": [')
                 return {"decisions": [{"option": 0, "admit": True, "reason": "Synthetic matching activity"}]}
+            if request["operation"] == "assess_information_progress":
+                return synthetic_information_review(request)
             raise AssertionError(request["operation"])
         run = local_run(agent)
         document = Document("https://example.test/table", "Fixture",
@@ -896,6 +902,8 @@ class ReadingBindingTests(unittest.TestCase):
         self.assertFalse(result.evaluated)
         self.assertEqual(record.controller_state.history, (0,))
         self.assertIn("not negative evidence", result.diagnostics[0]["why"])
+        self.assertEqual(result.diagnostics[0]["source"], "https://example.test/unavailable")
+        self.assertEqual(result.diagnostics[0]["requested_fields"], [FIELD])
 
     def test_bad_memory_does_not_discard_valid_admitted_evidence(self):
         quote = "Cq = 30 quanta/m3."
@@ -907,6 +915,8 @@ class ReadingBindingTests(unittest.TestCase):
                                        "anchors": [{"span": "nonexistent", "quote": "Invented passage"}]}}
             if request["operation"] == "review_research_evidence":
                 return {"decisions": [{"option": 0, "admit": True, "reason": "Exact synthetic model value"}]}
+            if request["operation"] == "assess_information_progress":
+                return synthetic_information_review(request)
             raise AssertionError(request["operation"])
         run = local_run(agent)
         document = Document("https://example.test/memory", "Source", quote, 600)
@@ -1017,19 +1027,22 @@ class CalculationToolTests(unittest.TestCase):
         ledger.merge(comparison)
         credit = ledger.result().credit(("evidence_consistency",), scientific=True)
         self.assertEqual(credit.qualities[0][2], 0)
-        # A changed support version cannot silently authenticate an old prediction.
+        # A changed claim cannot silently authenticate an old prediction.
         key = next(iter(prediction.calculations[0]["assumption_versions"]))
-        changed = {**ledger.assumptions[key], "version": "changed-support-version"}
+        changed = {**ledger.assumptions[key], "version": "changed-support-version", "statement": "Revised scope"}
         ledger.merge(ResearchResult(assumptions=(changed,)))
-        with self.assertRaisesRegex(ValueError, "stale calculation"):
-            self.execute(ledger, "compare_predictions_with_observations", (),
-                prediction=prediction_key, observation=observation_key, metric="individual_infection_probability")
+        historical = self.execute(ledger, "compare_predictions_with_observations", (),
+            prediction=prediction_key, observation=observation_key, metric="individual_infection_probability")
+        self.assertAlmostEqual(historical.calculations[0]["output"]["residual"], 0)
+        self.assertEqual(historical.calculations[0]["assumption_versions"][key], prediction.calculations[0]["assumption_versions"][key])
 
-    def test_unsupported_inputs_cannot_be_used_even_with_positive_model_review(self):
+    def test_unassessed_inputs_can_be_computed_without_earning_support(self):
         ledger = self.ledger({"floor_area_m2": 50, "room_height_m": 3})
         ledger.assumptions.clear()
-        with self.assertRaisesRegex(ValueError, "reasonableness support"):
-            self.execute(ledger, "calculate_geometry_and_removal", ("floor_area_m2", "room_height_m"), metrics=[])
+        result = self.execute(ledger, "calculate_geometry_and_removal", ("floor_area_m2", "room_height_m"), metrics=[])
+        self.assertEqual(result.facts[0].value, 150)
+        self.assertEqual(len(result.calculations[0]["support_issues"]), 2)
+        self.assertEqual(result.estimates[0]["reasonableness"], 0)
 
 
 class ReportProjectionTests(unittest.TestCase):
@@ -1053,7 +1066,8 @@ class ReportProjectionTests(unittest.TestCase):
         self.assertEqual(progress["calculated_quantities"], len(METRICS))
         self.assertEqual(progress["targets"]["target"]["coverage"],
                          self.report(self.result).data["scenarios"]["target"]["coverage"])
-        changed = replace(self.result, assumptions=tuple({**a, "version": "changed"} for a in self.result.assumptions))
+        changed = replace(self.result, assumptions=tuple({**a, "version": "changed", "statement": "Revised scope"}
+                                                        for a in self.result.assumptions))
         stale = scientific_progress(changed, METRICS)
         self.assertEqual(stale["calculated_quantities"], 0)
         self.assertTrue(all(r["status"] == "unsupported_calculation" for r in stale["targets"]["target"]["coverage"].values()))
@@ -1087,7 +1101,8 @@ class ReportProjectionTests(unittest.TestCase):
         self.assertIn("not applicable", report.markdown())
         self.assertIn("requires unmasked", report.markdown())
         self.assertEqual(ledger.result().credit((metric,), scientific=True).qualities[0][2], 1)
-        stale = replace(ledger.result(), assumptions=tuple({**a, "version": "changed"} for a in ledger.assumptions.values()))
+        stale = replace(ledger.result(), assumptions=tuple({**a, "version": "changed", "reasonableness": 0}
+                                                         for a in ledger.assumptions.values()))
         withdrawn = self.report(stale, (metric,))
         self.assertFalse(withdrawn.passed)
         self.assertEqual(withdrawn.data["scenarios"]["case"]["coverage"][metric]["status"], "unsupported_applicability")
@@ -1101,7 +1116,8 @@ class ReportProjectionTests(unittest.TestCase):
         self.assertTrue(all(q == 0 for _, _, q in result.credit(METRICS, scientific=True).qualities))
 
     def test_stale_calculations_are_history_not_current_coverage(self):
-        assumptions = tuple({**a, "version": "new-support-version"} for a in self.result.assumptions)
+        assumptions = tuple({**a, "version": "new-support-version", "statement": "Revised scope"}
+                            for a in self.result.assumptions)
         report = self.report(replace(self.result, assumptions=assumptions))
         self.assertFalse(report.passed)
         scenario = report.data["scenarios"]["target"]
@@ -1128,7 +1144,8 @@ class ReportProjectionTests(unittest.TestCase):
     def test_stale_alternative_cannot_expand_supported_sensitivity_range(self):
         previous = self.result.estimates[0]
         stale = {**previous, "label": "Historical alternative", "assumption_versions": {
-            k: "old-version" for k in previous["assumption_versions"]}}
+            k: "old-version" for k in previous["assumption_versions"]}, "assumption_claims": {}}
+        stale.pop("metric_support", None)
         report = self.report(replace(self.result, estimates=(*self.result.estimates, stale)))
         self.assertTrue(report.passed)
         scenario = report.data["scenarios"]["target"]

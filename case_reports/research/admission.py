@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
 import hashlib
-import re
 
+from ...task_executors._http import ProviderError
 from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter
 from ...task_executors.scenario_metrics.catalog import METRICS
 from ...task_executors.unit_conversion.units import METERS_PER_FOOT, SECONDS_PER_DAY
@@ -14,7 +13,8 @@ from .assumptions import text as required_text
 
 
 CONVERSIONS = {
-    ("m3/h", "m3/s"): 1/3600, ("L/s", "m3/s"): 0.001,
+    ("m3/h", "m3/s"): 1/3600, ("m3/min", "m3/s"): 1/60,
+    ("L/s", "m3/s"): 0.001,
     ("L/min", "m3/s"): 1/60000, ("h", "s"): 3600, ("min", "s"): 60,
     ("1/h", "1/s"): 1/3600, ("ACH", "1/s"): 1/3600,
     ("um", "m"): 1e-6, ("cm2", "m2"): 1e-4, ("mL", "m3"): 1e-6,
@@ -31,13 +31,17 @@ CONVERSIONS = {
 
 
 EVIDENCE_FIELDS = frozenset(UNITS) | frozenset(CONDITIONS) | frozenset(METRICS)
+SOURCE_UNITS = {
+    field: sorted({unit} | {printed for printed, target in CONVERSIONS if target == unit})
+    for field, unit in UNITS.items()
+}
 
 
 def extraction_response_schema(source):
     """Use the same field vocabulary as admission, with explicit JSON types."""
     text = {"type": "string", "minLength": 1}
     shared = {name: dict(text) for name in ("subject", "quote", "context", "basis")}
-    shared["subject"]["description"] = "Actual source event or population, not the target unless directly applicable."
+    shared["subject"]["description"] = "Stable actual event or population identity, reusing known_source_subjects when applicable. Do not create a new event identity for each measured field, table, or attendee subgroup; preserve those distinctions in context. Do not substitute a target scenario."
     shared["quote"]["description"] = "One exact contiguous original source span, preserving qualifiers."
     shared["context"]["description"] = "Disease, strain, population, activity and event identity."
     shared["basis"]["description"] = "What this supports, constrains or contradicts, and what it does not establish."
@@ -45,19 +49,30 @@ def extraction_response_schema(source):
              "value": {"type": "number", "description":
                        "Finite scalar number explicitly printed in the source, not a quoted numeric string. "
                        "Do not put a range, bound, expression or null here. Preserve those in evidence instead."},
-             "unit": {**text, "description": "Unit of the printed number; preserve it before conversion."},
+             "unit": {"type": "string", "enum": sorted({unit for units in SOURCE_UNITS.values() for unit in units}),
+                      "description": "Select an equivalent notation from accepted_source_units for this field, preserving the source's printed numeric value and scale. For example, hour and h are equivalent labels, but h and s have different scales. Do not convert the number yourself. If no unit represents the reported quantity, preserve it as qualitative evidence rather than renaming the quantity or dropping its dimensions."},
              "kind": {"type": "string", "enum": ["request_constraint"] if source == "request" else
                       ["source_observation", "source_model_parameter"]}}
     evidence = {**shared, "claim": {**text, "description":
                "Source-supported qualitative claim, range, bound, equation or applicability condition."},
+                "evidence_role": {"type": "string", "enum": ["request_constraint"] if source == "request" else
+                    ["observation", "model_statement", "context"],
+                    "description": "Observation reports an empirical event, measurement or outcome, including ranges. A model statement is a formula, fitted parameter, assumption or hypothetical case, not an observation."},
+                "observed_fields": {"type": "array", "uniqueItems": True,
+                    "items": {"type": "string", "enum": sorted(UNITS)},
+                    "description": "Only quantities actually observed or measured in this quotation, including reported ranges or bounds. Related inferred quantities belong in fields instead. Use [] for model statements, context, requester constraints, or observations with no matching declared quantity."},
                 "fields": {"type": "array", "minItems": 1,
+                           "description": "Declared quantities or conditions this evidence informs, not necessarily quantities measured directly in the source",
                            "items": {"type": "string", "enum": sorted(EVIDENCE_FIELDS)}}}
     return {"type": "object", "additionalProperties": False,
             "required": ["facts", "evidence", "findings"], "properties": {
                 "facts": {"type": "array", "items": {"type": "object", "additionalProperties": False,
                           "required": list(facts), "properties": facts}},
                 "evidence": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-                             "required": list(evidence), "properties": evidence}},
+                             "required": list(evidence), "properties": evidence,
+                             "allOf": [{"if": {"properties": {"evidence_role": {
+                                 "enum": ["model_statement", "context", "request_constraint"]}}},
+                                 "then": {"properties": {"observed_fields": {"maxItems": 0}}}}]}},
                 "findings": {"type": "array", "items": {"type": "string"},
                              "description": "Limitations, contradictions and remaining information needs; not new evidence."}}}
 
@@ -65,26 +80,18 @@ def extraction_response_schema(source):
 def canonical_notation(unit):
     if isinstance(unit, str):
         unit = unit.strip().replace("\u2212", "-")
-        power = re.fullmatch(r"(m|cm|ft)\s*\^?\s*([23\u00b2\u00b3])", unit)
-        if power:
-            return power[1] + power[2].translate(str.maketrans("\u00b2\u00b3", "23"))
-        inverse = re.fullmatch(r"(h|s|day)\s*(?:\^\s*)?-\s*1", unit)
-        if inverse:
-            return "1/" + inverse[1]
         parts = unit.split("/")
         if len(parts) == 2 and all(part.strip() for part in parts):
             unit = "/".join("1" if part.strip() == "1" else canonical_notation(part) for part in parts)
-    if isinstance(unit, str) and re.fullmatch(r"[u\u03bc\u00b5]\s*Pa\s*[*\u00b7]\s*s", unit):
-        return "uPa*s"
-    if isinstance(unit, str) and (re.fullmatch(r"\([u\u03bc\u00b5]m/cm\)(?:\^?3|\u00b3)", unit)
-                                 or re.fullmatch(r"[u\u03bc\u00b5]m(?:\^?3|\u00b3)/cm(?:\^?3|\u00b3)", unit)):
-        return "um3/cm3"
     aliases = {"quanta/m^3": "quanta/m3", "quanta/m\u00b3": "quanta/m3",
                "infection quanta/m3 exhaled air": "quanta/m3",
                "q/m3": "quanta/m3", "q/m^3": "quanta/m3", "q/m\u00b3": "quanta/m3",
                "q/h": "quanta/h", "q/s": "quanta/s",
                "people": "person", "persons": "person",
                "unitless": "dimensionless", "1": "dimensionless",
+               "hour": "h", "hours": "h", "hr": "h", "hr.": "h",
+               "minute": "min", "minutes": "min", "mins": "min",
+               "second": "s", "seconds": "s", "sec": "s", "sec.": "s",
                "foot": "ft", "feet": "ft", "ft^2": "ft2", "ft\u00b2": "ft2",
                "ft^3": "ft3", "ft\u00b3": "ft3", "ft3/min": "cfm", "ft^3/min": "cfm",
                "m^3": "m3", "m\u00b3": "m3", "cm^3": "cm3", "cm\u00b3": "cm3",
@@ -94,21 +101,66 @@ def canonical_notation(unit):
                "m\u00b3/s": "m3/s", "m\u00b3/h": "m3/h", "m^3/s": "m3/s", "m^3/h": "m3/h",
                "m\u00b2": "m2", "cm\u00b2": "cm2", "\u03bcm": "um", "\u00b5m": "um",
                "h^-1": "1/h", "h-1": "1/h", "h\u207b\u00b9": "1/h", "/h": "1/h",
-               "s^-1": "1/s", "s-1": "1/s"}
+               "per h": "1/h", "ac/h": "ACH",
+               "quanta per h": "quanta/h", "quanta h-1": "quanta/h", "quanta h^-1": "quanta/h",
+               "q h-1": "quanta/h", "q h^-1": "quanta/h", "q h\u207b\u00b9": "quanta/h",
+               "m3 h-1": "m3/h", "m3 h^-1": "m3/h", "m^3 h^-1": "m3/h",
+               "m\u00b3 h\u207b\u00b9": "m3/h", "m3 min-1": "m3/min", "m3 min^-1": "m3/min",
+               "kg m-3": "kg/m3", "kg m^-3": "kg/m3", "kg m\u207b\u00b3": "kg/m3",
+               "s^-1": "1/s", "s-1": "1/s",
+               "\u03bcPa*s": "uPa*s", "\u00b5Pa*s": "uPa*s", "\u03bcPa\u00b7s": "uPa*s",
+               "um^3/cm^3": "um3/cm3", "\u03bcm3/cm3": "um3/cm3", "\u03bcm\u00b3/cm\u00b3": "um3/cm3"}
     return aliases.get(unit, unit)
 
 
 def exact_span(quote, source):
-    if isinstance(quote, str) and quote.strip() and quote not in source:
-        match = re.search(r"\s+".join(re.escape(token) for token in quote.split()), source)
-        if match:
-            quote = match.group(0)
     if not isinstance(quote, str) or not quote.strip() or quote not in source:
         raise ValueError("Evidence quote is not an exact source span")
     return quote
 
 
-def extract_and_admit(agent, *, text, source, focus, objective, context, question, feedback=(), source_spans=None,
+def review_candidates(agent, request, source_version):
+    candidates = request["candidates"]
+    try:
+        review = agent(request)
+        decisions = review.get("decisions")
+        if not isinstance(decisions, list) or len(decisions) != len(candidates):
+            raise ValueError("Applicability review must decide every candidate")
+        seen = set()
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                raise ValueError("Each evidence review decision must be an object")
+            index = decision.get("option")
+            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(candidates) or index in seen:
+                raise ValueError("Invalid or repeated review option")
+            seen.add(index)
+            if type(decision.get("admit")) is not bool or not isinstance(decision.get("reason"), str) or not decision["reason"].strip():
+                raise ValueError("Review requires boolean admit and a reason")
+        return decisions
+    except (ProviderError, OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        # Keep discovery distinct from independent admission, even if the latter cannot finish.
+        index = []
+        for candidate in candidates:
+            record = candidate["normalized"]
+            quote = record["quote"]
+            key, span = min(((k, s) for k, s in request["available_source_spans"].items() if quote in s),
+                            key=lambda item: len(item[1]))
+            start = span.index(quote)
+            index.append({"option": candidate["option"],
+                **{k: record[k] for k in ("subject", "field", "fields", "value", "unit", "claim",
+                                        "evidence_role", "observed_fields") if k in record},
+                "location": {"span": key, "start_in_span": start, "end_in_span": start + len(quote)}})
+        exc.extraction_state = {
+            "status": "independent_review_incomplete", "source": request["source"],
+            "source_version": source_version, "candidate_count": len(candidates), "candidates": index,
+            "checks_completed": "Exact source-span match; declared fields; numeric representation, conversion and domain checks where applicable",
+            "not_established": "Independent verification of meaning, units, entailment and applicability; these candidates are not admitted evidence or a completed rejection",
+        }
+        exc.unreviewed_candidates = diagnostic_value(candidates)
+        raise
+
+
+def extract_and_admit(agent, *, text, source, objective, context, question, feedback=(), source_spans=None,
                       source_version=None):
     spans = source_spans or {"current": text}
     source_version = source_version or hashlib.sha256(text.encode()).hexdigest()
@@ -119,22 +171,45 @@ def extract_and_admit(agent, *, text, source, focus, objective, context, questio
                 return exact_span(quote, span)
             except ValueError:
                 pass
-        raise ValueError("Evidence quote is not an exact source span")
+        raise ValueError("Evidence quote is not contained in any one available original source span; "
+                         "do not join separate rows or reformat source text")
     response = agent({
         "operation": "extract_research_evidence", "objective": objective,
-        "question": question, "focus": list(focus), "context": context,
+        "question": question, "context": context,
         "previous_attempt_findings": list(feedback),
-        "canonical_units": UNITS, "model_conditions": CONDITIONS, "source": source, "source_text": text,
+        "canonical_units": UNITS, "accepted_source_units": SOURCE_UNITS,
+        "model_conditions": CONDITIONS, "source": source, "source_text": text,
         "response_contract": extraction_response_schema(source),
         "instruction": (
             "Return an instance of response_contract, which is a JSON Schema, not an output template. "
             "Numeric facts require finite JSON numbers, never strings. Put reported ranges, inequalities "
-            "and equations in evidence with their exact quotes and qualifiers. If OCR or flattened "
+            "and equations in evidence with their exact quotes and qualifiers. A unit is not a variable "
+            "name or an inferred quantity. Select an equivalent notation from accepted_source_units "
+            "without changing the printed numeric value. The deterministic converter handles scale "
+            "changes after extraction. If the printed quantity or scale has no supported representation, "
+            "retain it as qualitative evidence with its original numbers, units and meaning. "
+            "Filtration efficiency is not penetration, per-person flow is not total flow, and RNA "
+            "concentration is not a virion or quanta concentration. Related measurements can support "
+            "later explicit inferences but must not be relabeled as those inferred quantities. "
+            "Do not put population labels in unit: record human counts in person or count, unitless values in "
+            "dimensionless, and percentages in %. Retain the counted population in context. "
+            "If OCR or flattened "
             "typesetting makes a number ambiguous, retain the expression as qualitative evidence and "
             "explain the ambiguity instead of silently repairing it. Never choose a midpoint "
             "or endpoint to manufacture a scalar. Evidence can concern declared parameters, conditions "
             "or calculated outputs, but a quoted equation or range is not itself a computed output or "
-            "supported target assumption. Use empty arrays when nothing qualifies. For source=request, "
+            "supported target assumption. Measurements of ingredients or related systems can inform an "
+            "assumption even without a dedicated numeric field. Preserve such measurements in qualitative "
+            "evidence with their numbers, units and context, and tag the declared quantities they inform. "
+            "Do not rename an ingredient's measurement as the final parameter or perform the inference "
+            "during extraction. Label empirical ranges or bounds as evidence_role=observation, and "
+            "identify the actual observed quantities in observed_fields. A modeling assumption, fitted "
+            "parameter or equation is model_statement, even if reported by a source; it has no observed_fields. "
+            "Keep the same event subject for its measurements and modeling choices; context preserves "
+            "case definitions, populations, activity, and exposure segments. Reuse known_source_subjects "
+            "only when they identify the same event or population, not merely a related topic. "
+            "Do not merge different events or erase subgroup and time-window distinctions. "
+            "Use empty arrays when nothing qualifies. For source=request, "
             "only explicit requester-defined conditions are evidence; requested unknown answers and "
             "workflow requirements are not scientific evidence."
         ),
@@ -154,10 +229,6 @@ def extract_and_admit(agent, *, text, source, focus, objective, context, questio
                 raise ValueError(f"{field} must be a finite JSON number, not {type(raw['value']).__name__}; "
                                  "preserve ranges, bounds and expressions in qualitative evidence")
             value = finite(raw["value"], field)
-            printed_numbers = re.findall(r"(?<![\w.])[-+]?(?:\d[\d,]*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", quote)
-            if not any(math.isclose(value, float(n.replace(",", "")), rel_tol=1e-12, abs_tol=0)
-                       for n in printed_numbers):
-                raise ValueError("The proposed printed number does not occur in the evidence quote")
             printed_unit = canonical_notation(raw["unit"])
             factor = 1 if printed_unit == unit else CONVERSIONS.get((printed_unit, unit))
             if factor is None:
@@ -188,6 +259,15 @@ def extract_and_admit(agent, *, text, source, focus, objective, context, questio
             if invalid:
                 raise ValueError(f"Unknown evidence fields {invalid!r}; use names declared in response_contract")
             item["fields"] = list(dict.fromkeys(fields))
+            role = raw.get("evidence_role")
+            roles = {"request_constraint"} if source == "request" else {"observation", "model_statement", "context"}
+            if role not in roles:
+                raise ValueError("Qualitative evidence requires a declared evidence_role")
+            observed = raw.get("observed_fields")
+            if (not isinstance(observed, list) or any(not isinstance(field, str) or field not in UNITS for field in observed)
+                    or len(set(observed)) != len(observed) or (role != "observation" and observed)):
+                raise ValueError("observed_fields must name actual observed quantities, not inferred/model quantities or requester constraints")
+            item.update(evidence_role=role, observed_fields=observed)
             item.update(source=source, quote=quote_span(raw["quote"]),
                         source_version=source_version,
                         kind="request_constraint" if source == "request" else "source_evidence")
@@ -198,7 +278,7 @@ def extract_and_admit(agent, *, text, source, focus, objective, context, questio
                                 "why": str(exc), "proposal": raw})
     admitted, evidence = [], []
     if candidates:
-        review = agent({
+        decisions = review_candidates(agent, {
             "operation": "review_research_evidence", "objective": objective,
             "context": context, "source": source, "source_text": text,
             "available_source_spans": spans,
@@ -219,7 +299,19 @@ def extract_and_admit(agent, *, text, source, focus, objective, context, questio
                 "a fitted parameter or a hypothetical scenario. Reject incompatible assignment to the "
                 "target, ventilation mistaken for total loss, RNA copies mistaken for quanta, and "
                 "unsupported extrapolation. A quote match alone does not establish applicability."
-                " Qualitative claims must be entailed by the quoted passage. For source=request, admit "
+                " Qualitative claims must be entailed by the quoted passage. Their fields are relevance "
+                "tags, not assertions that the source directly measures those quantities. A related "
+                "measurement or model relation can inform a downstream parameter when the basis "
+                "explains a legitimate indirect connection. Judge that connection; do not reject a "
+                "source-supported claim merely because a relevance tag names an inferred quantity. "
+                "Reject unjustified tags or a claim that equates distinct physical quantities. "
+                "This does not relax numeric fact field/value/unit identity or license inventing "
+                "an inferred value during extraction. Independently verify "
+                "evidence_role and observed_fields: a reported measurement or event-outcome range can "
+                "be observation, but a fitted model parameter or assumed range cannot. observed_fields "
+                "must identify quantities actually observed in the quote, not merely quantities the "
+                "evidence might help infer. For source=request, require evidence_role=request_constraint, "
+                "no observed_fields, and admit "
                 "only conditions the requester explicitly defines, not scientific answers they ask you to discover."
             ),
             "response_contract": {"type": "object", "additionalProperties": False,
@@ -231,20 +323,9 @@ def extract_and_admit(agent, *, text, source, focus, objective, context, questio
                                 "option": {"type": "integer", "enum": list(range(len(candidates)))},
                                 "admit": {"type": "boolean"},
                                 "reason": {"type": "string", "minLength": 1}}}}}},
-        })
-        decisions = review.get("decisions")
-        if not isinstance(decisions, list) or len(decisions) != len(candidates):
-            raise ValueError("Applicability review must decide every candidate")
-        seen = set()
+        }, source_version)
         for decision in decisions:
-            if not isinstance(decision, dict):
-                raise ValueError("Each evidence review decision must be an object")
-            index = decision.get("option")
-            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(candidates) or index in seen:
-                raise ValueError("Invalid or repeated review option")
-            seen.add(index)
-            if type(decision.get("admit")) is not bool or not isinstance(decision.get("reason"), str) or not decision["reason"].strip():
-                raise ValueError("Review requires boolean admit and a reason")
+            index = decision["option"]
             if decision["admit"]:
                 item = candidates[index][1]
                 if isinstance(item, Fact):

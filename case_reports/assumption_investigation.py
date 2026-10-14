@@ -14,6 +14,7 @@ from ..method_loop import (
     ReportContract, SourceEnd,
 )
 from .research.assumptions import RUBRIC, assess_assumption
+from .research.progress import ADDITIONAL_SUPPORT, parameter_support
 from .research.records import Credit, Ledger, ResearchMessage, ResearchResult
 
 
@@ -50,11 +51,12 @@ def latest_assessments(result):
 
 
 def assumption_credit(result, fields):
-    latest = latest_assessments(result)
+    points = {row["field"]: row["points"]
+              for row in parameter_support(result, fields, hypotheses_only=True)}
     return Credit(evaluated=result.evaluated, qualities=tuple(
-        (field, "current_assessment", latest.get(field, {}).get("resolution_credit", 0))
+        (field, "parameter_learning", points.get(field, 0))
         for field in fields
-    ))
+    ), quality_resolution=ADDITIONAL_SUPPORT)
 
 
 def assumption_summary(result, completion, request):
@@ -124,7 +126,7 @@ class AssumptionInvestigation:
         scientific, initial = self.controllers[path[-1][1]]
         return ResearchController(self.fields, initial=initial, capacity=2,
                                   window=self.limits.yield_window,
-                                  epoch="assumption_justification_v1")
+                                  epoch="assumption_justification_v1", point_scores=scientific)
 
     def episode(self, parent, source, grain, objective, contract):
         self.sequence += 1
@@ -133,7 +135,7 @@ class AssumptionInvestigation:
         goal = EpisodeGoal.child(parent.goal, objective=objective,
                                  result_contract={"fields": list(self.fields)})
         return Episode(grain, key, source,
-                       EpisodeRequest(goal, ResearchMessage(objective, self.fields, (self.subject,)), contract),
+                       EpisodeRequest(goal, ResearchMessage(objective, (self.subject,)), contract),
                        source.build_result, on_unit=source.after_verdict)
 
     def open(self, parent, contract):

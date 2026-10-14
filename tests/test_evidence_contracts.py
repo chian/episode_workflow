@@ -301,7 +301,7 @@ class WorkflowContractTests(unittest.TestCase):
         assert_source_backed_calibration(self, report)
 
     def test_runtime_disease_is_not_a_fixed_case(self):
-        for disease in ("influenza", "measles", "unseen airborne pathogen"):
+        for disease in ("synthetic pathogen alpha", "synthetic pathogen beta", "unseen airborne pathogen"):
             with self.subTest(disease=disease):
                 _, report, queries = run_synthetic(disease=disease)
                 self.assertTrue(report.passed)

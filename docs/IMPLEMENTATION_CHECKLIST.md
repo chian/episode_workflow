@@ -3,14 +3,22 @@
 Source specification: the user-approved tree attached on 2026-10-09.
 This checklist records completion evidence, not a substitute specification.
 
+Current acceptance is defined in [Current Goal](CURRENT_GOAL.md). Historical
+test counts and run summaries below describe their recorded implementations;
+they do not verify the current worktree. Tests and calculation replays are not
+being run under the current instructions. V20 is still running, and a passing
+live run with all three quantities and outbreak-calibration provenance remains
+unverified. Static implementation checkmarks do not establish live acceptance.
+
 ## Required End State
 
-- [x] Active prompt-only entry point uses one method_loop Context and this tree:
-  evaluate_safety_guideline > investigate > strategy > search > page >
+- [x] Active runtime disease/scenario entry point uses one method_loop Context and this tree:
+  evaluate_airborne_safety_guideline > investigate > strategy > search > page >
   (source_table | report | lexical_probe).
 - [x] Root selectable tools: calculate_geometry_and_removal,
   calibrate_infectiousness, calculate_transmission_metrics,
-  calculate_conditional_limits, compare_predictions_with_observations.
+  calculate_conditional_limits. The active caller-selected scenario path excludes
+  compare_predictions_with_observations; no answer-matching metric is required.
   Deterministic calculations are leaves, not single-shot episode wrappers.
 - [x] Every episode uses numerical credit-yield continuation. Operational
   limits and failed observations are distinguishable from scientific saturation.
@@ -26,14 +34,19 @@ This checklist records completion evidence, not a substitute specification.
   before evidence admission. Repeated material cannot manufacture progress.
 - [x] Calculations retain exact assumption/model versions. Evidence retractions
   invalidate current support without deleting historical calculations.
-- [x] Root credit reflects supported requested conclusions and resolved
+- [x] Root credit reflects current provisional computations, supported requested conclusions and resolved
   scientific uncertainty, not field/source/call counts. Parents recompute credit.
-- [ ] Reports are synthesized at root closure and include applicable risk,
-  duration, occupancy, clean-air, and distance quantities with named assumptions,
-  evidence, missingness, uncertainty, and calibration/validation distinctions.
+- [x] Expanding the target-scenario set preserves existing progress credit
+  without awarding credit merely for creating scenarios. V9 demonstrated
+  denominator dilution; the follow-up uses stable per-scenario credit units,
+  verified by eight regression tests and a replay of the affected snapshots.
+- [ ] Live root closure returns allowable time at fixed separation, safe distance
+  at fixed duration, and R_in at both, for every selected scenario and background
+  regime, with named assumptions, evidence, missingness and uncertainty. The
+  same coherent parameterization must retain runtime outbreak-calibration lineage.
 - [x] No externally structured answers, seeded research results, cross-repo
   imports, or third-party runtime packages are introduced.
-- [x] Offline tests exercise exact topology, controlled choices, mandatory
+- [x] Historical offline tests exercised exact topology, controlled choices, mandatory
   assessment, contracts, long-document reading, all tools, version changes,
   failure propagation, numerical limits, and standalone execution.
 - [x] Study a live prompt-only trace; record the actual observed behavior and
@@ -62,11 +75,61 @@ not claims of live scientific success:
 - `tests/test_standalone.py`: all imports are local or standard library, and an
   isolated checkout runs the offline suite without site-packages or `.env`.
 
-The offline suite currently runs 204 tests (203 pass; one opt-in live test is
+The offline suite currently runs 286 tests (285 pass; one opt-in live test is
 skipped). The first bounded live run of the approved tree completed but produced
 no calculations; it exhausted its model-call budget. Its observed response
 failures, first corrections, and outstanding live verification are recorded in
 `RESPONSE_FAILURE_STUDY.md`. That run does not verify the later corrections.
+
+The user's clarification separates calculation execution from scientific support.
+The five existing tools can now examine recorded numerical guesses and unassessed
+conditions. Missing, negative or unavailable support review does not stop a
+defined calculation; its qualification, versioned provenance and credit remain
+separate. `tests/test_calculation_support.py` checks this through the real
+method loop, including computed outcomes returning to the investigation branch,
+unsupported derivations, calibration, review failure and retained prior support.
+The V8 search audit also traced useful entrainment/mouth-area extraction to a
+failed mandatory review and an uninformative parent return. The follow-up keeps
+useful unreviewed candidates in diagnostic audit and passes their compact status,
+source locations and affected fields to parent synthesis and the next proposal.
+Local allowances now stop new work, not mandatory completion of an in-flight
+unit; the global ceiling stays hard. `tests/test_pending_extraction.py` covers
+review failures, the local/global distinction, indirect evidence and parent
+communication without granting evidence credit to unfinished work.
+
+V9 finished incomplete at 322 model calls and 79 total units, with 58 numeric
+facts, 96 qualitative records, 43 assessments and four calculation records.
+The root's 24-unit operational ceiling ended the run while numerical control
+still requested continuation. Duration/distance calls mixed metric names from
+different tools and were rejected. Follow-up schemas and error messages now
+expose exact tool ownership, with unit-label clarification for extraction.
+
+Saved snapshots also established two scoring defects: unchanged completed
+reassessments invalidated a calculation, and unsupported inputs suppressed
+outputs that did not use them. `test_assessment_currency.py` and
+`test_metric_support.py` cover claim/review separation, real invalidation,
+executed dependency traces, derived parameters, merged estimates, comparison
+support, and per-quantity credit/coverage. Original calculation versions remain
+unchanged; current support is a projection. The bulk-flow timescale no longer
+requires source-count or mask assumptions unrelated to its formula. These
+changes postdate V9 and have no unseeded live verification yet. The separate
+scope-denominator defect is fixed by adding reviewed per-scenario contributions
+with unchanged requirement-group weights. Credit is progress, not a completion
+fraction; empty scenarios and repeated assessments earn nothing. See the V9
+trace study for exact attribution and saved-record replay results.
+
+V10 reached numerical saturation at 473 calls after computing all 23 requested
+quantities early, but did not establish a coherent evidence-supported report.
+Repeated document-order reading never reached relevant sections already present
+in retrieved bodies. `test_reading_coverage.py` now checks versioned examination
+and review coverage, source revisits, parent contracts and failure boundaries.
+`test_provisional_solution.py` checks numerical/evidential separation, a 1/8
+computational progress floor, no repeat/relabel credit, real retractions,
+transitive invalidation, coherent merging, and calculations after a failed first
+assumption review. These changes do not seed values, force a reading choice,
+modify the episode tree or turn operational stopping into scientific completion.
+The V10 study and saved-record inspection are in `RESPONSE_FAILURE_STUDY.md`;
+live verification of these post-V10 changes is still required.
 
 Report production and interpretation pass synthetic checks, but a successful
 unseeded live scientific report remains unverified. The second bounded live run
@@ -123,6 +186,10 @@ remain available to independent review. Offline tests cover bounded child work,
 condensed communication, repeated/inherited failures, synthesis failure reaching
 ancestors, and assessment of existing evidence after failed acquisition. These
 changes have not yet been verified by a live run.
+
+The V8 follow-up changes local deadline enforcement as described above: mandatory
+completion may pass a local deadline under the global ceiling. The paragraph
+above records the earlier allocation design, not the revised enforcement rule.
 
 The HTTP boundary now retains bounded recognized provider error fields instead
 of only status codes, redacting the configured credential before truncation and
@@ -252,9 +319,62 @@ Local Git is initialized on `main`, with the requested URL as `origin`. The
 `.artifacts`. The index scan found no configured API keys or private-key markers.
 The full quantitative goal remains incomplete.
 
+The initial publication was verified at commit
+`16538f302823668dbbc9e9b99819c14f2e597cf8` on `origin/main`. Subsequent local
+changes are not part of that published snapshot. The final verified-goal
+publication remains outstanding.
+
 - [ ] Finish and verify the full implementation goal before claiming completion.
 - [x] Inspect the commit contents for credentials, local configuration, virtual
   environments, and private/raw research artifacts; these must remain excluded.
 - [ ] Initialize the repository if needed, commit the verified source and tests,
   and push to the requested destination without overwriting unrelated history.
 - [ ] Verify the remote commit and report the repository URL and commit.
+
+## Resumed Contract Verification
+
+The user resumed the goal after the contract/credit/communication changes.
+`tests/test_contract_progress.py` verifies delegated-question acquisition credit,
+exact hypothesis delivery without admission, partial scientific learning without
+calculation support, grade-aware numerical yield, and processed parent context
+with failure information retained. The complete isolated offline suite passed
+with 218 successes and one opt-in live skip. These are software-contract tests,
+not evidence that the live semantic assessments are calibrated.
+
+The new V8 run uses the unchanged `ORIGINAL_SCIENTIFIC_REQUEST.txt`, all 23 default
+requested quantities, and the same 480-call/480-unit operational ceilings as V7.
+It receives no external scientific parameter records, source text or seeded
+search results. V7 was verified suspended and remains preserved with its older
+loaded code; V8 is a separate implementation test, not a continuation of V7.
+V8 artifacts are `.artifacts/live/approved-tree-v8-{report,audit}.json` and
+`.artifacts/live/approved-tree-v8.stdout`. Completion and scientific success
+remain unverified until its terminal artifacts can be inspected.
+
+After V8 startup, an isolated reproduction confirmed that an unfinished
+reassessment erased prior scientific credit. The current worktree now retains
+the last completed judgment and version, keeps added material unreviewed, and
+passes that distinction in failure synthesis. Five regressions cover provider,
+contract and operational failures, parent credit, independent partial success,
+first-assessment failure, and a later valid downward correction. The full isolated
+suite passes with 223 successes and one opt-in live skip. V8 retains its older
+loaded implementation; its startup hashes must not be mistaken for verification
+of this subsequent correction. No live input or process state was modified.
+
+V8 has now completed on numerical low yield at 443 calls and 184 units, retaining
+59 numeric records, 135 qualitative records, 17 current assumption records
+(six numerical candidates) and zero calculations. All admitted source-version
+and quotation checks passed, and the original request was unchanged. Its complete
+model-attempt audit records 13 explicit policy refusals, not merely the two visible
+error messages in the deduplicated progress log. The credit decrease at call 171
+was reconstructed exactly: six assumptions lost earned credit solely because
+reassessment could not finish. This confirms the separately reproduced and fixed
+state-handling defect, not scientific disproof of those assumptions.
+
+The trace also exposed browsing plans placed in the literal search-query field.
+The strategy prompt/schema now describe actual provider execution and separate
+query text from the delegated information objective. A regression verifies the
+actual model request and verbatim provider input; it does not prove live model
+compliance. The full suite now passes 224 tests with one opt-in live skip. This
+post-study prompt change and the earlier retention correction are not verified
+by V8. Parent fixation on source-fidelity questions before any calculation remains
+unresolved, and the complete quantitative goal remains open.

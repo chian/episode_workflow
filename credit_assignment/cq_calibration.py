@@ -137,7 +137,7 @@ class CqRarefactionReport:
 
     should_yield: bool
     score: float
-    max_score: float
+    max_score: float | None
     recent_gain: float
     gain_threshold: float
     score_resolution: float
@@ -152,12 +152,11 @@ class CqRarefactionReport:
             raise ValueError("CqRarefactionReport.score must be non-negative")
         if not math.isfinite(self.score):
             raise ValueError("CqRarefactionReport.score must be finite")
-        if self.max_score <= 0.0:
-            raise ValueError("CqRarefactionReport.max_score must be positive")
-        if not math.isfinite(self.max_score):
-            raise ValueError("CqRarefactionReport.max_score must be finite")
-        if self.score > self.max_score:
-            raise ValueError("CqRarefactionReport.score cannot exceed max_score")
+        if self.max_score is not None:
+            if not math.isfinite(self.max_score) or self.max_score <= 0.0:
+                raise ValueError("CqRarefactionReport.max_score must be finite and positive")
+            if self.score > self.max_score:
+                raise ValueError("CqRarefactionReport.score cannot exceed max_score")
         if self.recent_gain < 0.0:
             raise ValueError("CqRarefactionReport.recent_gain must be non-negative")
         if not math.isfinite(self.recent_gain):
@@ -212,8 +211,8 @@ class CqRarefactionReport:
         }
 
     @property
-    def normalized_score(self) -> float:
-        return self.score / self.max_score
+    def normalized_score(self) -> float | None:
+        return self.score / self.max_score if self.max_score is not None else None
 
 
 @dataclass(frozen=True)
@@ -691,17 +690,17 @@ def score_cq_normalization_child(
 def cq_normalization_rarefaction(
     score_history: Iterable[float],
     *,
-    max_score: float,
+    max_score: float | None,
     score_resolution: float = 1.0,
     efficiency_fraction: float = 0.5,
     window_size: int = 2,
 ) -> CqRarefactionReport:
-    """Stop when adaptive marginal score gain saturates or the child completes."""
+    """Stop on marginal saturation, or completion when a finite ceiling exists."""
 
     scores = tuple(float(score) for score in score_history)
     if not scores:
         raise ValueError("score_history must contain at least one score")
-    if not math.isfinite(max_score) or max_score <= 0.0:
+    if max_score is not None and (not math.isfinite(max_score) or max_score <= 0.0):
         raise ValueError("max_score must be finite and positive")
     if not math.isfinite(score_resolution) or score_resolution <= 0.0:
         raise ValueError("score_resolution must be finite and positive")
@@ -710,7 +709,7 @@ def cq_normalization_rarefaction(
     if window_size <= 0:
         raise ValueError("window_size must be positive")
     if any(
-        not math.isfinite(score) or score < 0.0 or score > max_score
+        not math.isfinite(score) or score < 0.0 or (max_score is not None and score > max_score)
         for score in scores
     ):
         raise ValueError("score_history values must be finite and in [0, max_score]")
@@ -736,7 +735,7 @@ def cq_normalization_rarefaction(
             productive_gain_baseline * efficiency_fraction
         )
     gain_threshold = max(threshold_candidates)
-    should_yield = score >= max_score
+    should_yield = max_score is not None and score >= max_score
     outcome = "complete" if should_yield else "continue"
     if not should_yield and len(scores) > window_size:
         should_yield = recent_gain < gain_threshold

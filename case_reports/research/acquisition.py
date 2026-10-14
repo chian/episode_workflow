@@ -2,18 +2,37 @@
 
 from datetime import datetime, timezone
 from dataclasses import replace
+import asyncio
 import json
 
 from ...method_loop import SourceEnd
+from ...method_loop.episode_binding.web_search_binding import SearchPageProposer
 from ...task_executors._http import ProviderError
 from ...task_executors.outbreak_search.queries import (
-    source_locator, source_text, search_results_from_provider,
+    source_locator, source_text,
 )
 from .admission import extract_and_admit, exact_span
 from .assumptions import text as required_text
 from .documents import Document, Span, rank_spans
-from .engine import ResearchSource, selected_choice
-from .records import ResearchResult
+from .communication import merged_ranges, reading_coverage
+from .engine import BudgetExceeded, ResearchSource, selected_choice
+from .model_tiers import ModelTier, TABLE_PAGE_EXTRACTION_TIER
+from .records import Ledger, ResearchResult, identity
+from .relevance import (
+    assess_source_types, assess_source_types_with_jev, source_profiles,
+    target_comparison_context,
+)
+
+
+SOURCE_ASSESSMENT_BATCH_SIZE = 3
+
+
+def _init_relevance_state(source):
+    source.event_types = {row["type_id"]: dict(row) for row in source.ledger.source_event_types.values()}
+    source.relationships = {(row["source"], row["source_subject"], row["target_subject"], row["parameter"]): dict(row)
+                            for row in source.ledger.source_target_relationships.values()}
+    source.profile_versions = {}
+    source.next_type_number = 1
 
 
 class StrategySource(ResearchSource):
@@ -21,24 +40,132 @@ class StrategySource(ResearchSource):
         super().__init__(run, inherited)
         self.approach = approach
         self.queries = []
+        _init_relevance_state(self)
+
+    def assess(self, result):
+        scoped_targets = self.parent_contract.measurements.get("target_scenarios", {})
+        if not scoped_targets or not result.evaluated:
+            return result
+        shared = getattr(getattr(self.run, "global_goal", None), "ledger", None)
+        working = Ledger(shared.result() if shared is not None else self.ledger.result())
+        working.merge(self.ledger.result())
+        working.merge(result)
+        self.event_types.update((row["type_id"], dict(row)) for row in working.source_event_types.values())
+        self.relationships.update(((row["source"], row["source_subject"], row["target_subject"], row["parameter"]), dict(row))
+                                  for row in working.source_target_relationships.values())
+        targets = {name: target_comparison_context({**definition, "subject": name},
+                    working.assumptions.values()) for name, definition in scoped_targets.items()}
+        profiles = source_profiles(working.result(), self.parameter_requirements)
+        versions = {}
+        for source in {locator for locator, _ in profiles}:
+            versions[source] = identity({"subjects": {subject: profile for (locator, subject), profile in profiles.items()
+                                                        if locator == source}, "targets": targets})
+        assigned = {tuple(member) for group in self.event_types.values()
+                    for member in group["members"]}
+        for source, version in versions.items():
+            scoped = {subject: profile for (locator, subject), profile in profiles.items() if locator == source}
+            if (all((source, subject) in assigned for subject in scoped)
+                    and all((relation := self.relationships.get((source, subject, target, self.parameter), {})).get("target_version")
+                            == identity(targets[target]) and relation.get("source_profile_version") == identity(scoped[subject])
+                            for subject in scoped for target in targets)):
+                self.profile_versions[source] = version
+        changed = [source for source, version in sorted(versions.items())
+                   if self.profile_versions.get(source) != version]
+        if not changed:
+            return result
+        groups = {key: {**group, "members": list(group["members"])}
+                  for key, group in self.event_types.items()}
+        relationships = dict(self.relationships)
+        next_number = self.next_type_number
+        processed = []
+        failure = None
+        jev_assessor = getattr(getattr(self.run, "providers", None), "source_target_assessor", None)
+        for source in changed:
+            for group in groups.values():
+                group["members"] = [member for member in group["members"] if member[0] != source]
+            relationships = {key: row for key, row in relationships.items() if key[0] != source}
+            subjects = sorted(subject for locator, subject in profiles if locator == source)
+            batch_size = len(subjects) if jev_assessor is not None else SOURCE_ASSESSMENT_BATCH_SIZE
+            for start in range(0, len(subjects), batch_size):
+                batch = {(source, subject): profiles[(source, subject)]
+                         for subject in subjects[start:start + batch_size]}
+                try:
+                    if jev_assessor is not None:
+                        decisions, assessed_relations = assess_source_types_with_jev(
+                            self.run.complete, jev_assessor, source, batch, targets, groups,
+                            self.run.context.get("disease_of_interest"), parameter=self.parameter)
+                    else:
+                        decisions, assessed_relations = assess_source_types(
+                            self.run.complete, source, batch, targets, groups,
+                            self.run.context.get("disease_of_interest"), parameter=self.parameter)
+                except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+                    failure = self.failure_result(exc, "source_event_relevance")
+                    break
+                for decision in decisions:
+                    type_id = decision["type_id"]
+                    if type_id == "new":
+                        type_id = f"{self.goal.goal_id}:type:{next_number}"
+                        next_number += 1
+                    group = groups.setdefault(type_id, {"members": []})
+                    group.update(description=decision["description"], basis=decision["basis"],
+                                 target_relevance=dict(decision["target_relevance"]))
+                    group["members"].extend([source, subject] for subject in decision["subjects"])
+                relationships.update(((row["source"], row["source_subject"], row["target_subject"], row["parameter"]), row)
+                                     for row in assessed_relations)
+            if failure:
+                break
+            processed.append(source)
+        self.event_types = groups
+        self.relationships = relationships
+        self.profile_versions.update({source: versions[source] for source in processed})
+        self.next_type_number = next_number
+        return replace(result, source_event_types=tuple({"type_id": key, **group}
+                                                        for key, group in groups.items()),
+                       source_target_relationships=tuple(relationships.values()),
+                       issues=(*result.issues, *(failure.issues if failure else ())),
+                       diagnostics=(*result.diagnostics, *(failure.diagnostics if failure else ())))
 
     def propose(self, view):
+        if self.evidence_handoff_ready():
+            return SourceEnd("parameter_evidence_ready_for_assessment")
         proposal = self.run.agent(self.inputs(view, operation="propose_strategy_query",
             approach=self.approach, previous_queries=self.queries,
-            instruction="Propose a search within this evidence approach using prior source findings and failures. Do not stop; numerical yield controls continuation. Do not repeat an identical query.",
+            search_execution={
+                "query": "Passed unchanged to a web search provider as a literal search-engine query.",
+                "result": "Source candidates, not execution of a browsing plan. The search episode selects sources; page and reading episodes retrieve and examine their content.",
+            },
+            instruction=(
+                "Propose a search addressing the delegated uncertainty and unadmitted hypotheses in the parent information contract. "
+                "Use prior findings and failure implications to distinguish resolved from open questions. "
+                "Your investigation parent owns candidate assumption proposals and their reasonableness "
+                "assessment. This subtree returns source evidence, bounds and applicability information; "
+                "it cannot record target-case hypotheses on the parent's behalf. "
+                "The query field is search text, not instructions to an agent. Use searchable terms, identifiers, "
+                "phrases or a concise search question. Instructions to open URLs, inspect XML, follow links, "
+                "extract equations or stop are not executed by the search provider. Put the information need "
+                "and interpretation requirements in objective, separate from the literal query. Later source "
+                "selection and reading episodes examine returned sources; merely including a route or action "
+                "in query does not establish that it was attempted. A source inventory or another equation "
+                "mention is not progress unless the contract needs it. The original research request is context, "
+                "not a requirement to explore every topic. Numerical yield controls continuation. "
+                "The assigned calculation parameter and its scoring criteria are fixed. A query "
+                "or objective may guide where to look, but cannot add scored requirements. "
+                "Give the child only its specific information question, including necessary context. "
+                "Its brief return should explain trends and implications for your next decision. "
+                "Do not repeat an identical query."),
             response_contract={"type": "object", "additionalProperties": False,
                 "required": ["query", "objective"], "properties": {
-                    "query": {"type": "string", "minLength": 1, "description": "New concrete search query"},
-                    "objective": {"type": "string", "minLength": 1, "description": "Information this search should resolve"},
-                    "child_model_calls": self.child_budget_schema()}}))
+                    "query": {"type": "string", "minLength": 1, "description": "Literal search-engine query, forwarded unchanged; not browsing or extraction instructions"},
+                    "objective": {"type": "string", "minLength": 1, "description": "Information the child should resolve and how it bears on the parent's uncertainty; not part of the search query"}}}))
         self.last_proposal = proposal
         query = required_text(proposal.get("query"), "query")
         if query.casefold().strip() in {q.casefold().strip() for q in self.queries}:
             raise ValueError("This strategy has already searched that query")
         objective = required_text(proposal.get("objective"), "objective")
         child = self.run.child(view, SearchSource(self.run, self.ledger.result(), query=query),
-            "search", objective, self.focus, proposal=proposal,
-            contract=self.contract(f"Determine how results for {query!r} bear on {self.approach}", self.focus))
+            "search", objective, proposal=proposal,
+            contract=self.contract(objective, subjects=self.requested_subjects,
+                target_scenarios=self.parent_contract.measurements.get("target_scenarios")))
         self.queries.append(query)
         return self.edge(child)
 
@@ -46,41 +173,49 @@ class StrategySource(ResearchSource):
 class SearchSource(ResearchSource):
     def __init__(self, run, inherited, *, query):
         super().__init__(run, inherited)
-        self.query, self.candidates = query, None
-        self.visited = set()
+        self.query = query
+        self.proposer = SearchPageProposer(query=query, limit=run.limits.search_limit,
+                                          provider_search=run.search,
+                                          jev=run.providers.page_assessor,
+                                          select_page=self.select_page)
+        self.view = None
+
+    def select_page(self, goal, candidates, previous_pages):
+        proposal = self.run.agent(self.inputs(self.view, operation="choose_research_source", query=self.query,
+            search_goal=str(self.goal.objective), candidates=candidates, previous_pages=previous_pages,
+            response_contract={"type": "object", "additionalProperties": False,
+                "required": ["option_id", "objective", "rationale"], "properties": {
+                    "option_id": {"type": "string", "enum": [row["option_id"] for row in candidates]},
+                    "objective": {"type": "string", "minLength": 1,
+                                  "description": "Evidence to seek in the selected source"},
+                    "rationale": {"type": "string", "minLength": 1}}},
+            instruction="Select for the still-unresolved delegated question using prior source findings and failure implications, including contrary evidence. Give the source child a specific question and necessary context, not your entire assignment. Its brief synthesis should inform your next source choice. Do not prefer breadth for its own sake or treat a failed retrieval as scientific disproof. Return an instance of the JSON Schema: the source choice belongs in option_id. Numerical yield controls continuation."))
+        self.last_proposal = proposal
+        return proposal
 
     def propose(self, view):
-        if self.candidates is None:
-            try:
-                raw = search_results_from_provider(self.run.providers.search(self.query, self.run.limits.search_limit))
-            except (ProviderError, OSError, ValueError) as exc:
-                self.failure = "search_provider_failure"
-                return self.leaf(lambda error=exc: self.failure_result(error, "search"), "search_failure")
-            unique = {source_locator(r): r for r in raw if source_locator(r)}
-            self.candidates = {f"source:{i}": r for i, r in enumerate(unique.values(), 1)}
-        remaining = {k: r for k, r in self.candidates.items() if k not in self.visited}
-        if not remaining:
+        if self.evidence_handoff_ready():
+            return SourceEnd("parameter_evidence_ready_for_assessment")
+        self.view = view
+        candidate = asyncio.run(self.proposer.next(self.goal))
+        if candidate is None:
             return None
-        proposal = self.run.agent(self.inputs(view, operation="choose_research_source", query=self.query,
-            candidates={k: {"url": source_locator(r), "title": r.get("title", ""),
-                            "description": r.get("description", r.get("snippet", ""))} for k, r in remaining.items()},
-            response_contract={"type": "object", "additionalProperties": False,
-                "required": ["option", "question"], "properties": {
-                    "option": {"type": "string", "enum": list(remaining)},
-                    "child_model_calls": self.child_budget_schema(),
-                    "question": {"type": "string", "minLength": 1,
-                                 "description": "Evidence to seek in the selected source"}}},
-            instruction="Select using actual prior source findings. Return an instance of the JSON Schema: the source choice belongs in the top-level field option. Selection is not permission to stop."))
-        self.last_proposal = proposal
-        if "option" not in proposal:
-            raise ValueError(f"Missing required top-level field 'option'; received fields {list(proposal)!r}. "
-                             f"Set 'option' to one of {list(remaining)!r}. No source was selected or visited.")
-        option = selected_choice(proposal.get("option"), remaining, "option")
-        question = required_text(proposal.get("question"), "question")
-        source = PageSource(self.run, self.ledger.result(), candidate=remaining[option])
-        child = self.run.child(view, source, "page", question, self.focus, proposal=proposal,
-            contract=self.contract(f"Judge what this source establishes about {question}", self.focus))
-        self.visited.add(option)
+        proposal = candidate["page_selection"]["proposal"]
+        question = proposal["objective"]
+        event = {"operation": "select_page", "status": "completed",
+            "query": self.query, "source": source_locator(candidate),
+            "binding": "SearchPageProposer", "proposal": proposal,
+            "jev_assessment": candidate["page_selection"]["assessment"],
+            "jev_score_meaning": "Page relevance to the local search question; source-event relevance to a target is not yet assessed.",
+            "investigated_target_subjects": list(self.requested_subjects),
+            "source_target_relation_status": "unknown_until_source_event_assessed"}
+        self.run.provider_events.append(event)
+        self.run.emit_trace("provider_event", provider_event=event)
+        source = PageSource(self.run, self.ledger.result(), candidate=candidate)
+        child = self.run.child(view, source, "page", question, proposal=proposal,
+            contract=self.contract(f"Judge what this source establishes about {question}",
+                subjects=self.requested_subjects,
+                target_scenarios=self.parent_contract.measurements.get("target_scenarios")))
         return self.edge(child)
 
 
@@ -88,12 +223,18 @@ class PageSource(ResearchSource):
     def __init__(self, run, inherited, *, candidate):
         super().__init__(run, inherited)
         self.candidate, self.document = candidate, None
+        _init_relevance_state(self)
+
+    def assess(self, result):
+        # Review source-to-target relationships as page evidence arrives, before
+        # the search and strategy parents finish their own episodes.
+        return StrategySource.assess(self, result)
 
     def prepare(self):
         locator = source_locator(self.candidate)
-        text = source_text(self.candidate) or self.run.documents.get(locator, {}).get("text", "")
+        text = self.run.documents.get(locator, {}).get("text", "")
         if not text:
-            retrieved = self.run.providers.retrieve(self.candidate)
+            retrieved = self.run.retrieve(self.candidate)
             text = retrieved if isinstance(retrieved, str) else source_text(retrieved or {})
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Source retrieval returned no document text; this is not negative evidence")
@@ -107,32 +248,62 @@ class PageSource(ResearchSource):
         self.run.documents[locator] = {**version, "versions": versions}
 
     def propose(self, view):
+        if self.evidence_handoff_ready():
+            return SourceEnd("parameter_evidence_ready_for_assessment")
         if self.document is None:
             try:
                 self.prepare()
             except (ProviderError, OSError, ValueError) as exc:
                 self.failure = "source_retrieval_failure"
-                return self.leaf(lambda error=exc: self.failure_result(error, "retrieval"), "retrieval_failure")
+                failed = self.failure_result(exc, "retrieval")
+                failed = replace(failed, diagnostics=tuple({**d, "source": source_locator(self.candidate)}
+                                                          for d in failed.diagnostics))
+                return self.leaf(lambda: failed, "retrieval_failure")
         document = self.document
+        document.examined_ranges = merged_ranges([*document.examined_ranges,
+            *(pair for attempt in self.ledger.reading_attempts.values()
+              if attempt["source"] == document.source and attempt["source_version"] == document.sha256
+              and attempt["status"] != "not_started" for pair in attempt["ranges"])])
         tables = {t.key: t for t in document.tables if t.key not in document.attempted_tables}
         options = {key: {"episode": "source_table", **t.summary()} for key, t in tables.items()}
-        if document.remaining():
+        if document.remaining("reexamine"):
             if not document.report_attempted:
-                options["report"] = {"episode": "report", "meaning": "Read remaining text in document order with cross-window context"}
-            options["lexical_probe"] = {"episode": "lexical_probe", "meaning": "Rank remaining chunks by a literal source-local query"}
+                options["report"] = {"episode": "report", "meaning":
+                    "Sequential reading with cross-window context; unexamined scope skips previously examined ranges. "
+                    "A section name in question does not move the cursor; reaching later sections requires successive windows."}
+            options["lexical_probe"] = {"episode": "lexical_probe", "meaning": "Rank source-local chunks by a literal query within the chosen reading scope; unexamined scope excludes previously supplied text from ranking and extraction."}
         if not options:
             return None
         proposal = self.run.agent(self.inputs(view, operation="propose_page_child",
-            source_summary=document.summary(), available_children=options,
-            instruction="Choose among the actual available reading scopes. Use report for information distributed across sections, source_table for a detected table, or lexical_probe for a targeted query. No fixed reading order. You do not decide continuation.",
+            source_summary={**document.summary(), "prior_reading": reading_coverage(
+                a for a in self.ledger.reading_attempts.values() if a["source"] == document.source)},
+            available_children=options,
+            instruction=("Choose among the actual available reading scopes using the delegated information need and prior coverage. "
+                "report reads sequentially from the next unprocessed span; it cannot jump to a named section in question. "
+                "lexical_probe ranks source-local chunks for a targeted query, including material beyond the opening windows. "
+                "source_table examines a detected table. For report or lexical_probe, choose reading_scope: "
+                "unexamined reads text not previously supplied to extraction in this source version, including "
+                "coverage from table rows and earlier visits; reexamine permits deliberate rereading for a new "
+                "question, failed extraction, or missing context. State that unresolved purpose in question. "
+                "Previously examined glossary rows are not unexamined equation discussion merely because "
+                "a new query ranks the same terms. Source versions with changed text have separate coverage. "
+                "Earlier reading under a different question does not rule out a useful reread. "
+                "Distinguish unread material from examined material that did not answer "
+                "the question. Give the reader that specific question and necessary context; "
+                "its brief synthesis should explain findings or failed-route trends relevant to your "
+                "next reading choice. Do not hand it the whole parent assignment. No fixed reading order, "
+                "no mandatory reading choice. You do not decide continuation."),
             response_contract={"type": "object", "additionalProperties": False,
                 "required": ["option", "question"], "properties": {
                     "option": {"type": "string", "enum": list(options)},
                     "question": {"type": "string", "minLength": 1, "description": "Child information need"},
-                    "child_model_calls": self.child_budget_schema(),
+                    "reading_scope": {"type": "string", "enum": ["unexamined", "reexamine"],
+                                      "description": "For report/lexical_probe: seek unexamined text or deliberately reread; tables retain row-query selection."},
                     "query": {"type": "string", "minLength": 1, "description": "Literal query for lexical_probe"}},
                 "allOf": [{"if": {"properties": {"option": {"const": "lexical_probe"}}},
-                           "then": {"required": ["query"]}}]}))
+                           "then": {"required": ["query"]}},
+                          {"if": {"properties": {"option": {"enum": ["report", "lexical_probe"]}}},
+                           "then": {"required": ["reading_scope"]}}]}))
         self.last_proposal = proposal
         option = selected_choice(proposal.get("option"), options, "option")
         question = required_text(proposal.get("question"), "question")
@@ -141,14 +312,18 @@ class PageSource(ResearchSource):
             source = SourceTableSource(self.run, inherited, document=document, table=tables[option])
             grain = "source_table"
         elif option == "report":
-            source = ReportSource(self.run, inherited, document=document)
+            scope = selected_choice(proposal.get("reading_scope", "unexamined"),
+                                    ("unexamined", "reexamine"), "reading_scope")
+            source = ReportSource(self.run, inherited, document=document, reading_scope=scope)
             grain = "report"
         else:
+            scope = selected_choice(proposal.get("reading_scope", "unexamined"),
+                                    ("unexamined", "reexamine"), "reading_scope")
             source = LexicalProbeSource(self.run, inherited, document=document,
-                query=required_text(proposal.get("query"), "query"))
+                query=required_text(proposal.get("query"), "query"), reading_scope=scope)
             grain = "lexical_probe"
-        child = self.run.child(view, source, grain, question, self.focus, proposal=proposal,
-            contract=self.contract(f"Establish source-grounded evidence for {question}", self.focus))
+        child = self.run.child(view, source, grain, question, proposal=proposal,
+            contract=self.contract(f"Establish source-grounded evidence for {question}"))
         if option in tables:
             document.attempted_tables.add(option)
         elif option == "report":
@@ -157,6 +332,8 @@ class PageSource(ResearchSource):
 
 
 class ReadingSource(ResearchSource):
+    extraction_tier = ModelTier.REASONING
+
     def __init__(self, run, inherited, *, document):
         super().__init__(run, inherited)
         self.document = document
@@ -179,10 +356,17 @@ class ReadingSource(ResearchSource):
             allowed[window.key] = window
         proposed_memory = None
         memory_diagnostics = []
+        extraction_started = False
+        first_call = self.run.model_calls + 1
 
         def agent(request):
-            nonlocal proposed_memory
+            nonlocal proposed_memory, extraction_started
             if request["operation"] == "extract_research_evidence":
+                # Joining nonadjacent rows creates text that cannot be quoted
+                # as one original span. Present the actual spans instead.
+                request = {k: v for k, v in request.items() if k != "source_text"}
+                memory_spans = list(dict.fromkeys([*allowed,
+                    *(anchor["span"] for anchor in self.memory["anchors"])]))
                 request = {**request, "reading_memory": self.memory,
                     "source_spans": {k: s.as_record() for k, s in allowed.items()},
                     "response_contract": {**request["response_contract"],
@@ -193,10 +377,25 @@ class ReadingSource(ResearchSource):
                                 "unresolved_links": {"type": "array", "items": {"type": "string"}},
                                 "anchors": {"type": "array", "items": {
                                     "type": "object", "additionalProperties": False, "required": ["span", "quote"],
-                                    "properties": {"span": {"type": "string", "description": "Available or retained source span key"},
+                                    "properties": {"span": {"type": "string", "enum": memory_spans,
+                                                            "description": "Available or retained source span key"},
                                                    "quote": {"type": "string", "minLength": 1}}}}}}}},
-                    "reading_instruction": "Use retained context to resolve subjects across windows. Evidence must cite an available original span, never memory prose. Keep memory concise; it earns no credit."}
-            response = self.run.agent(request)
+                    "reading_instruction": (
+                        "source_spans contains the original text at each addressable source range. "
+                        "These entries are not necessarily adjacent in the document. Every quote must "
+                        "be entirely contained in one entry's text: do not concatenate rows or add "
+                        "separators, line breaks, headings or other formatting. Table headers and other "
+                        "provided spans may inform interpretation without being joined into the quote. "
+                        "Use retained context to resolve subjects across windows, never as quoted evidence. "
+                        "Choose memory anchors from the declared available or retained span keys. "
+                        "Keep memory concise; it earns no credit.")}
+            before = self.run.model_calls
+            try:
+                response = self.run.complete(request, tier=(self.extraction_tier
+                    if request["operation"] == "extract_research_evidence" else None))
+            finally:
+                if request["operation"] == "extract_research_evidence":
+                    extraction_started = self.run.model_calls > before
             if request["operation"] == "extract_research_evidence":
                 proposed_memory = response.get("reading_memory", self.memory)
                 try:
@@ -207,10 +406,25 @@ class ReadingSource(ResearchSource):
                     proposed_memory = self.memory
             return response
 
-        result = extract_and_admit(agent, text="\n".join(s.text for s in spans),
-            source=self.document.source, focus=self.focus, objective=self.goal.as_record()["objective"],
-            context=self.context(), question=question, feedback=(*self.ledger.findings, *self.ledger.issues),
-            source_spans={k: s.text for k, s in allowed.items()}, source_version=self.document.sha256)
+        communication = self.communication_context()
+        try:
+            result = extract_and_admit(agent, text="\n".join(s.text for s in spans),
+                source=self.document.source, objective=str(self.goal.objective),
+                context=self.context(), question=question,
+                feedback=(*communication["findings"], *communication["uncertainties"],
+                          *(f"{failure['meaning']} Limits: {failure['not_established']}" for failure in communication["failures"])),
+                source_spans={k: s.text for k, s in allowed.items()}, source_version=self.document.sha256)
+        except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+            result = self.failure_result(exc, "source_reading")
+        result = replace(result, reading_attempts=(*result.reading_attempts, {
+            "source": self.document.source, "source_version": self.document.sha256,
+            "document_characters": len(self.document.text), "episode_id": self.goal.goal_id,
+            "first_model_call": first_call, "question": question,
+            "ranges": [[s.start, s.end] for s in spans],
+            "status": "completed" if result.evaluated else "failed" if extraction_started else "not_started",
+            "admitted_fields": sorted({f.field for f in result.facts} | {f for e in result.evidence for f in e.get("fields", ())}),
+            "diagnostic_categories": sorted({d.get("category", "unknown") for d in result.diagnostics}),
+        }))
         if memory_diagnostics:
             result = replace(result, diagnostics=(*result.diagnostics, *memory_diagnostics),
                              issues=(*result.issues, *(f"Reading memory not updated: {d['why']}" for d in memory_diagnostics)))
@@ -236,6 +450,12 @@ class ReadingSource(ResearchSource):
             exact_span(anchor.get("quote"), allowed[anchor["span"]].text)
 
     def after_verdict(self, unit, contribution, view):
+        if self.pending is not None:
+            self.document.examined_ranges = merged_ranges([*self.document.examined_ranges,
+                *(pair for attempt in self.pending.reading_attempts
+                  if attempt["source"] == self.document.source
+                  and attempt["source_version"] == self.document.sha256
+                  and attempt["status"] != "not_started" for pair in attempt["ranges"])])
         if self.pending is not None and self.pending.evaluated:
             self.document.processed.update(s.key for s in self.pending_spans)
             self.seen_spans.update((s.key, s) for s in self.pending_spans)
@@ -246,9 +466,9 @@ class ReadingSource(ResearchSource):
 
 
 class ReportSource(ReadingSource):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, reading_scope="unexamined", **kwargs):
         super().__init__(*args, **kwargs)
-        self.spans, self.position = self.document.remaining(), 0
+        self.spans, self.position = self.document.remaining(reading_scope), 0
 
     def propose(self, view):
         if self.position >= len(self.spans):
@@ -266,23 +486,31 @@ class ReportSource(ReadingSource):
 
 
 class LexicalProbeSource(ReadingSource):
-    def __init__(self, *args, query, **kwargs):
+    def __init__(self, *args, query, reading_scope="unexamined", **kwargs):
         super().__init__(*args, **kwargs)
         self.query, self.position = query, 0
-        # Preserve actual neighbors even where earlier readers consumed a chunk.
-        self.ranked = tuple(span for span in rank_spans(self.document.spans, query)
-                            if span.key not in self.document.processed)
+        self.parts = {span.key: self.document.reading_parts(span, reading_scope)
+                      for span in self.document.spans}
+        # Empty ranking slots preserve physical neighbors; only original spans are extracted.
+        ranking = tuple(Span(span.key, span.start, span.end,
+                            "\n".join(part.text for part in self.parts.get(span.key, ())))
+                        for span in self.document.spans)
+        self.ranked = tuple(span.key for span in rank_spans(ranking, query) if self.parts.get(span.key))
 
     def propose(self, view):
         while self.position < len(self.ranked):
-            span = self.ranked[self.position]
+            key = self.ranked[self.position]
             self.position += 1
-            if span.key not in self.document.processed:
-                return self.leaf(lambda: self.read((span,), self.query), f"chunk:{span.start}:{span.end}")
+            spans = self.parts[key]
+            if spans:
+                return self.leaf(lambda: self.read(spans, str(view.goal.objective)),
+                                 f"chunk:{spans[0].start}:{spans[-1].end}")
         return None
 
 
 class SourceTableSource(ReadingSource):
+    extraction_tier = TABLE_PAGE_EXTRACTION_TIER
+
     def __init__(self, *args, table, **kwargs):
         super().__init__(*args, **kwargs)
         self.table, self.queried = table, set()

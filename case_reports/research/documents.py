@@ -6,6 +6,7 @@ import hashlib
 import re
 
 from .lexical import rank_spans
+from .communication import merged_ranges
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class Document:
     processed: set[str] = field(default_factory=set)
     attempted_tables: set[str] = field(default_factory=set)
     report_attempted: bool = False
+    examined_ranges: list = field(default_factory=list)
 
     def __post_init__(self):
         self.tables = table_regions(self.text)
@@ -96,12 +98,37 @@ class Document:
         self.spans = tuple(spans)
         self.sha256 = hashlib.sha256(self.text.encode()).hexdigest()
 
-    def remaining(self):
-        return tuple(s for s in self.spans if s.key not in self.processed)
+    def reading_parts(self, span, reading_scope="unexamined"):
+        if reading_scope == "reexamine":
+            return (span,)
+        if reading_scope != "unexamined":
+            raise ValueError("Reading scope must be unexamined or reexamine")
+        parts, position = [], span.start
+        for start, end in merged_ranges(self.examined_ranges):
+            if end <= position:
+                continue
+            if start >= span.end:
+                break
+            if position < start:
+                parts.append((position, start))
+            position = max(position, min(end, span.end))
+        if position < span.end:
+            parts.append((position, span.end))
+        return tuple(Span(f"{span.key}:range:{start}:{end}", start, end, self.text[start:end])
+                     for start, end in parts if self.text[start:end].strip())
+
+    def remaining(self, reading_scope="unexamined"):
+        return tuple(part for span in self.spans
+                     for part in self.reading_parts(span, reading_scope))
 
     def summary(self):
         return {"source": self.source, "title": self.title, "characters": len(self.text),
                 "opening": self.text[:500], "chunks": len(self.spans),
+                "source_version": self.sha256,
+                "examined_ranges": merged_ranges(self.examined_ranges),
+                "unexamined_characters": sum(s.end - s.start for s in self.remaining()),
+                "fully_examined_chunks": sum(not self.reading_parts(s) for s in self.spans),
+                "next_document_order_start": next((s.start for s in self.remaining()), None),
+                "reading_window_characters": self.window_size,
                 "outline": [line[:240] for line in self.text.splitlines() if line.startswith("#")][:50],
                 "tables": {t.key: t.summary() for t in self.tables}}
-

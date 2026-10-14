@@ -14,7 +14,7 @@ from ...task_executors.outbreak_search.queries import (
     source_text,
 )
 
-SEARCH_PAGE_SELECTION_VERSION = "local_model_planned_from_jev_evidence_v1"
+SEARCH_PAGE_SELECTION_VERSION = "local_model_planned_optional_jev_v2"
 
 
 @dataclass(frozen=True)
@@ -154,14 +154,16 @@ class SearchPageProposer:
         query: str,
         limit: int,
         provider_search: Callable[[str, int], Iterable[Mapping[str, Any]]],
-        llm: Any,
-        jev: Any,
+        llm: Any = None,
+        jev: Any = None,
+        select_page: Callable | None = None,
     ) -> None:
         self.query = query
         self.limit = limit
         self.provider_search = provider_search
         self.llm = llm
         self.jev = jev
+        self.select_page = select_page
         self._results: tuple[Mapping[str, Any], ...] | None = None
         self._assessments: dict[int, PageCandidateAssessment] = {}
         self._selected: set[int] = set()
@@ -169,12 +171,14 @@ class SearchPageProposer:
 
     async def next(self, goal: EpisodeGoal) -> Mapping[str, Any] | None:
         if self._results is None:
-            self._results = search_results_from_provider(self.provider_search(self.query, self.limit))
+            results = search_results_from_provider(self.provider_search(self.query, self.limit))
+            self._results = tuple({source_locator(r): r for r in results if source_locator(r)}.values())
             for rank, result in enumerate(self._results, start=1):
-                self._assessments[rank] = await assess_page_candidate(
-                    self.jev, goal=goal, query=self.query, result=result, provider_rank=rank,
-                )
-        pending = [rank for rank in self._assessments if rank not in self._selected]
+                if self.jev is not None:
+                    self._assessments[rank] = await assess_page_candidate(
+                        self.jev, goal=goal, query=self.query, result=result, provider_rank=rank,
+                    )
+        pending = [rank for rank in range(1, len(self._results) + 1) if rank not in self._selected]
         if not pending or len(self._selected) >= self.limit:
             return None
         candidates = []
@@ -186,11 +190,23 @@ class SearchPageProposer:
                 "title": str(result.get("title") or ""),
                 "url": source_locator(result),
                 "description": str(result.get("description") or result.get("snippet") or ""),
-                "jev_assessment": self._assessments[rank].to_dict(),
+                "jev_assessment": self._assessments[rank].to_dict() if rank in self._assessments else None,
             })
-        proposal = await propose_search_page(
-            self.llm, goal=goal.as_record(), candidates=candidates, previous_pages=self._history,
-        )
+        if self.select_page is not None:
+            response = self.select_page(goal.as_record(), candidates, list(self._history))
+            options = {row["option_id"]: row for row in candidates}
+            option = response.get("option_id")
+            if not isinstance(option, str) or option not in options:
+                raise ValueError("Search page proposer selected an undeclared option_id")
+            if any(not isinstance(response.get(key), str) or not response[key].strip()
+                   for key in ("objective", "rationale")):
+                raise ValueError("Search page proposal requires objective and rationale")
+            proposal = SearchPageProposal(option, options[option]["provider_rank"],
+                                         response["objective"], response["rationale"])
+        else:
+            proposal = await propose_search_page(
+                self.llm, goal=goal.as_record(), candidates=candidates, previous_pages=self._history,
+            )
         rank = proposal.provider_rank
         self._selected.add(rank)
         self._history.append(proposal.to_dict())
@@ -199,7 +215,8 @@ class SearchPageProposer:
             "provider_rank": rank,
             "page_selection": {
                 "version": SEARCH_PAGE_SELECTION_VERSION,
-                "assessment": self._assessments[rank].to_dict(),
+                "assessment": self._assessments[rank].to_dict() if rank in self._assessments else None,
+                "binding": "SearchPageProposer",
                 "proposal": proposal.to_dict(),
             },
         }

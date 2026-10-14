@@ -16,7 +16,7 @@ from .schema import (
 
 
 class ModelOutputError(ProviderError):
-    """Rejected model text, retained for study but never admitted as evidence."""
+    """Rejected provider text, retained for study but never admitted as evidence."""
 
     def __init__(self, message, *, category, raw_response, **details):
         super().__init__(message)
@@ -69,6 +69,19 @@ class ArgoClient:
             raise ProviderError(
                 "LLM response is missing choices[0].message.content"
             ) from exc
+        if isinstance(content, str) and content.strip():
+            notice = content.strip()
+            heading = notice.splitlines()[0].strip("\u26a0\ufe0f *")
+            if (heading == "IMPORTANT USAGE NOTICE FROM ARGO"
+                    and "ACCESS REVOKED" in notice
+                    and "Reason: Monthly limit exceeded." in notice
+                    and "END NOTICE FROM ARGO" in notice):
+                raise ModelOutputError(
+                    "Argo access revoked: monthly usage limit exceeded. "
+                    "Contact your Directorate Operations Officer for assistance.",
+                    category="provider_usage_limit", raw_response=content,
+                    provider="argo", retryable=False, reason="monthly_limit_exceeded",
+                )
         if choice.get("finish_reason") in {"length", "content_filter"}:
             raise ModelOutputError(
                 f"LLM response was incomplete: {choice['finish_reason']}",

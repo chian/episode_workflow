@@ -206,6 +206,20 @@ class ProviderHTTPTests(InMemoryTransportTests):
             with self.subTest(answer=answer), patch("episodic_workflow.task_executors._http.urlopen", return_value=json_response({"answers": {"decision": answer}})), self.assertRaises(ProviderError):
                 asyncio.run(JevDecisionClient("test-key").noul(state={}, instructions="relevance", criteria={}))
 
+    def test_jev_nouls_keeps_named_target_questions_separate(self):
+        body = {"answers": {"caller-a": {"type": "noul", "noul": 0.8},
+                            "caller-b": {"type": "noul", "noul": 0.2}}}
+        with patch("episodic_workflow.task_executors._http.urlopen",
+                   return_value=json_response(body)) as transport:
+            values = asyncio.run(JevDecisionClient("test-key").nouls(
+                state={"selected_targets": {"caller-a": {}, "caller-b": {}}},
+                questions={name: {"instructions": f"Compare {name}", "criteria": {"true": "match"}}
+                           for name in ("caller-a", "caller-b")}))
+        self.assertEqual(values, {"caller-a": 0.8, "caller-b": 0.2})
+        request = json.loads(transport.call_args.args[0].data)
+        self.assertEqual(set(request["questions"]), {"caller-a", "caller-b"})
+        self.assertTrue(all(row["type"] == "noul" for row in request["questions"].values()))
+
 
 class SelectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_selection_uses_model_choice_without_duplicate_pages(self):

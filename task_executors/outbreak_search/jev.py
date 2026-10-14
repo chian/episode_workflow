@@ -68,3 +68,35 @@ class JevDecisionClient:
                 "Jev Noul probability must be a number between zero and one"
             )
         return float(probability)
+
+    async def nouls(
+        self, *, state: Mapping[str, Any], questions: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, float]:
+        """Evaluate named Noul questions over one shared comparison state."""
+        if not questions:
+            raise ValueError("Jev Noul vector requires questions")
+        declarations = {}
+        for name, question in questions.items():
+            instructions = question.get("instructions")
+            criteria = question.get("criteria", {})
+            if not isinstance(instructions, str) or not instructions.strip() or not isinstance(criteria, Mapping):
+                raise ValueError("Jev Noul question requires instructions and criteria")
+            declarations[name] = {"type": "noul", "instructions": instructions,
+                                  "criteria": dict(criteria)}
+        body = await asyncio.to_thread(
+            post_json, self.endpoint,
+            {"state": dict(state), "model": self.model, "questions": declarations},
+            api_key=self.api_key, timeout=self.timeout,
+        )
+        answers = body.get("answers")
+        if not isinstance(answers, Mapping):
+            raise ProviderError("Jev response did not contain Noul answers")
+        probabilities = {}
+        for name in questions:
+            answer = answers.get(name)
+            probability = answer.get("noul") if isinstance(answer, Mapping) and answer.get("type") == "noul" else None
+            if (isinstance(probability, bool) or not isinstance(probability, (int, float))
+                    or not 0 <= probability <= 1):
+                raise ProviderError(f"Jev response did not contain a valid Noul for {name}")
+            probabilities[name] = float(probability)
+        return probabilities

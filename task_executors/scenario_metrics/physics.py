@@ -120,6 +120,13 @@ def threshold_distance(risk_tolerance: float, indoor_reproductive_number: float,
     return risk * plume * distance / (count * (epsilon - risk))
 
 
+def well_mixed_distance(risk_tolerance: float, indoor_reproductive_number: float) -> float:
+    """Spatially uniform risk: no positive minimum, or no separation remedy."""
+    epsilon = non_negative(risk_tolerance, "risk_tolerance")
+    risk = non_negative(indoor_reproductive_number, "indoor_reproductive_number")
+    return 0.0 if risk <= epsilon else math.inf
+
+
 def critical_radius(air_exchange_rate_s: float, room_height_m: float,
                     air_dynamic_viscosity_pa_s: float, particle_density_kg_m3: float,
                     air_density_kg_m3: float, gravity_m_s2: float) -> float:

@@ -35,7 +35,7 @@ class AssumptionSupportTests(unittest.TestCase):
         credit = ledger.result().credit((FIELD,), scientific=True)
         controller = ResearchController((FIELD,))
         self.assertEqual(controller.observe("extraction", credit, is_root=True).score, 0)
-        self.assertTrue(ledger.result().credit((FIELD,)).identities)
+        self.assertFalse(ledger.result().credit((FIELD,)).identities)
 
     def test_hypothesis_without_evidence_is_retained_but_not_credited(self):
         result = assess_assumption(lambda r: supported_review(r, grade=0, verdict="unsupported"),

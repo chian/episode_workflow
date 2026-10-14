@@ -61,7 +61,7 @@ def interpret_guideline_request(llm, request, models, *, requested_model=None):
     if model not in models:
         raise ValueError("Request did not select an implemented transmission model")
     extracted = extract_and_admit(
-        agent, text=request, source="request", focus=TARGET_FIELDS,
+        agent, text=request, source="request",
         objective="Interpret explicit target constraints only; do not answer the scientific question.",
         context={"research_request": request},
         question="Extract only explicit numeric conditions for subject target. Do not turn requested answers, reference examples or outbreak observations into target conditions.",

@@ -69,6 +69,6 @@ class EvidenceSource(AssumptionSource):
         return extract_and_admit(
             self.branch.agent, text=windows[window],
             source=source_locator(candidate) or candidate["source_ref"],
-            focus=self.branch.fields, objective=self.question, context=self.branch.context,
+            objective=self.question, context=self.branch.context,
             question=question, feedback=(*self.ledger.findings, *self.ledger.issues),
         )

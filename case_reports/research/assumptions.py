@@ -4,9 +4,12 @@ Ordinal review grades are operational judgments, not calibrated probabilities.
 The proposer cannot set its own credit or turn a conditional claim into evidence.
 """
 
-from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter, output_is_resolved
+from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter, output_meets_contract
 from ...task_executors.scenario_metrics.catalog import METRICS
-from .records import Credit, Fact, ResearchResult, identity, assessment_summary
+from .records import Credit, Fact, ResearchResult, identity, assessment_summary, current_support, current_computation
+from .scenarios import check_case_inputs
+from .progress import parameter_support
+from .verification import CALIBRATION_PROGRESS, calibration_progress, target_calibration_progress
 
 
 RUBRIC = {
@@ -15,6 +18,9 @@ RUBRIC = {
     "physical_consistency": "0: consistency unexamined; 1: plausible mechanism with unresolved checks; 2: relevant checks establish physical consistency or a contradiction.",
     "uncertainty": "0: uncertainty ignored; 1: consequential limitations identified; 2: alternatives or bounds examined and remaining limitations explained.",
 }
+
+# One rubric increment for a new usable computation; this is not evidence quality.
+PROVISIONAL_OUTPUT_CREDIT = 1 / (2 * len(RUBRIC))
 
 
 def text(value, name):
@@ -40,13 +46,20 @@ def reasonableness_response_schema(evidence, request_evidence=()):
         "allOf": [{"if": {"properties": {"grade": {"enum": [1, 2]}}},
                    "then": {"properties": {"evidence": {"minItems": 1}}}}]}
     return {"type": "object", "additionalProperties": False,
-        "required": ["verdict", "criteria", "limitations", "alternatives", "missing_evidence", "explanation", "request_constraint"],
+        "required": ["verdict", "criteria", "limitations", "alternatives", "missing_evidence", "explanation", "request_constraint",
+                     "supporting_evidence", "contradicting_evidence", "invalid_evidence"],
         "properties": {
             "verdict": {"type": "string", "enum": ["supported", "provisional", "unsupported", "contradicted"]},
             "criteria": {"type": "object", "additionalProperties": False, "required": list(RUBRIC),
                          "properties": {name: criterion for name in RUBRIC}},
             "limitations": text_list, "alternatives": text_list, "missing_evidence": text_list,
             "explanation": nonempty_text,
+            "supporting_evidence": {"type": "array", "uniqueItems": True, "items": evidence_item,
+                "description": "Admitted evidence supporting this exact parameter value or condition in its stated context, including justified indirect support. Background and contrary evidence do not belong here."},
+            "contradicting_evidence": {"type": "array", "uniqueItems": True, "items": evidence_item,
+                "description": "Admitted evidence opposing this claim in comparable conditions. Different contexts or values are not automatically contradictions; explain applicability in the review."},
+            "invalid_evidence": {"type": "array", "uniqueItems": True, "items": evidence_item,
+                "description": "Evidence records with an identified extraction or attribution error, explained in the review. A valid observation disagreeing with the hypothesis is contrary evidence, not invalid evidence."},
             "request_constraint": {"type": ["object", "null"], "additionalProperties": False,
                 "description": "Explicit requester condition instantiated by this candidate, or null for a scientific hypothesis. This is scope classification, not empirical support.",
                 "required": ["evidence", "reason"], "properties": {
@@ -68,12 +81,19 @@ def assumption_candidate(action, ledger):
         raise ValueError("Candidate assumption must be an object")
     subject, field = text(action.get("subject"), "subject"), action.get("field")
     if subject not in ledger.scenarios:
+        scope_instruction = ("Use an exact caller-defined subject; fixed cases cannot be introduced or replaced. "
+                             if any(s.get("scope_locked") for s in ledger.scenarios.values()) else
+                             "Use an exact existing subject or define the new scope in this proposal's scenarios list. ")
         raise ValueError(f"Assumption subject {subject!r} has no reviewed scenario definition. "
-                         f"Existing subjects: {list(ledger.scenarios)!r}. Use an exact existing subject "
-                         "or define the new scope in this proposal's scenarios list. "
+                         f"Existing subjects: {list(ledger.scenarios)!r}. " + scope_instruction +
                          "Source-evidence labels do not automatically define model scenarios.")
     if field not in UNITS and field not in CONDITIONS:
         raise ValueError("Unknown assumption field or model condition")
+    definition = ledger.scenarios[subject]
+    check_case_inputs(definition, {field: action.get("value")} if field in UNITS else {},
+                      {field: action.get("statement")} if field in CONDITIONS else {})
+    if field in definition.get("fixed_parameters", {}) or field in definition.get("fixed_conditions", {}):
+        raise ValueError(f"{field} is already a fixed scenario condition, not an assumption to propose or reassess")
     value = action.get("value")
     if field in UNITS:
         if value is None:
@@ -92,13 +112,16 @@ def assumption_candidate(action, ledger):
              "basis": text(action.get("basis"), "basis")}
 
 
-def candidate_response_schema():
+def candidate_response_schema(*, scenarios=None):
     prose = {"type": "string", "minLength": 1}
     properties = {name: prose for name in ("subject", "statement", "basis")}
     properties["subject"] = {**prose, "description": "Exact subject from context.defined_scenarios, "
         "or a new definition in this proposal's scenarios list. A source-evidence subject or "
         "colon-suffixed activity label alone is not a reviewed scenario."}
-    return {"oneOf": [
+    if scenarios is not None:
+        properties["subject"] = {"type": "string", "enum": list(scenarios),
+                                 "description": "Exact reviewed target or calibration context; no new scope or replacement is allowed"}
+    schema = {"oneOf": [
         {"type": "object", "additionalProperties": False,
          "required": [*properties, "field", "value", "unit"], "properties": {**properties,
              "field": {"type": "string", "enum": sorted(UNITS)},
@@ -110,6 +133,33 @@ def candidate_response_schema():
              "field": {"type": "string", "enum": sorted(CONDITIONS)},
              "value": {"type": "null"}, "unit": {"const": "condition"}}},
     ]}
+    if scenarios is not None:
+        for branch in schema["oneOf"]:
+            fields = branch["properties"]["field"]["enum"]
+            branch["allOf"] = []
+            for subject, definition in scenarios.items():
+                choices = [f for f in fields
+                    if f not in definition.get("fixed_parameters", {})
+                    and f not in definition.get("fixed_conditions", {})
+                    and f not in definition.get("calculation_variables", ())]
+                branch["allOf"].append({"if": {"properties": {"subject": {"const": subject}}},
+                    "then": {"properties": {"field": {"enum": choices} if choices else False}}})
+    return schema
+
+
+def unassessed_assumption(candidate, ledger):
+    """Retain a validated hypothesis, without inventing an independent judgment."""
+    claim = assumption_candidate(candidate, ledger)
+    key = identity([claim["subject"], claim["field"], claim["value"],
+                    claim["statement"] if claim["field"] in CONDITIONS else None])
+    assessment = {**claim, "key": key, "reasonableness": 0.0,
+        "role": "inferred_assumption", "evidence": {}, "review": {
+            "completed": False, "verdict": "unassessed", "criteria": {}, "request_constraint": None,
+            "explanation": "No independent reasonableness judgment completed. This remains a proposed hypothesis, not evidence.",
+            "limitations": ["Conditional calculations may use this hypothesis, but no evidential support is established."],
+            "alternatives": [], "missing_evidence": ["Independent reasonableness assessment is incomplete."]}}
+    assessment["version"] = identity(assessment)
+    return assessment
 
 
 def assess_assumption(agent, action, ledger, context):
@@ -131,13 +181,32 @@ def assess_assumption(agent, action, ledger, context):
         "instruction": (
             "Assess this candidate independently of its proposer's confidence. Evidence may support, "
             "constrain or contradict it. An inferred value need not appear verbatim in a source; explain "
-            "the inference and its bounds. Separate physical plausibility from empirical applicability. "
+            "the inference and its bounds. Evidence may concern ingredients, related systems or extremes "
+            "rather than the final parameter. Assess the approximation or analogy explicitly; an extreme "
+            "observation is not a representative measurement, but may anchor a bounded heuristic. "
+            "Separate physical plausibility from empirical applicability. "
             "Do not treat source model choices as observations or request constraints as empirical proof. "
             "Cite only supplied evidence options. Unsupported candidates remain hypotheses, not facts. "
+            "Separate supporting_evidence from contradicting_evidence for this exact claim and its "
+            "conditions. Do not count a different value in a different setting as a contradiction "
+            "without an applicability argument. Retain unresolved alternatives and explain genuine "
+            "conflicts; never choose a value by majority vote or number of sources. Evidence cited "
+            "to explain a limitation is not automatically corroboration. Each reference may appear "
+            "in at most one of these two lists. "
+            "Use invalid_evidence only for identified errors in extraction or attribution, not "
+            "because valid evidence disagrees with a hypothesis. Explain the specific error. "
+            "Valid contradictory evidence advances understanding even when current support falls. "
+            "Previously acquired learning is distinct from the latest claim's current support. "
             "Return an instance of the JSON Schema. A supported verdict requires grade 2 in every "
             "criterion. When support is bounded or indirect, use provisional with explicit limitations "
             "if warranted; do not inflate grades to fit a verdict. Every positive grade requires "
-            "admitted evidence references. The weakest grade limits the numerical credit. "
+            "admitted evidence references. Grade established understanding, not the amount of prose: "
+            "naming a limitation is not the same as bounding it with applicable evidence. "
+            "The weakest grade limits current conclusion support, not permission to calculate a hypothesis. "
+            "Learning credit separately records evidenced parameter values and distinct evidence that "
+            "strengthens, refines or overturns previously supported claims. It is not a rubric grade "
+            "or a measure of how completely a question was answered. Repeating an assessment or "
+            "proposing another candidate does not itself earn progress. "
             "Classify whether this candidate instantiates an explicit requester condition. If so, "
             "return request_constraint with its admitted request evidence and explain applicability "
             "to this target even when the request evidence names a broader scenario class. Otherwise "
@@ -168,6 +237,14 @@ def assess_assumption(agent, action, ledger, context):
     for name in ("limitations", "alternatives", "missing_evidence"):
         texts(review.get(name), name)
     text(review.get("explanation"), "explanation")
+    for name in ("supporting_evidence", "contradicting_evidence", "invalid_evidence"):
+        refs = texts(review.get(name), name)
+        if any(k not in evidence for k in refs) or len(set(refs)) != len(refs):
+            raise ValueError(f"{name} must contain distinct admitted evidence references")
+    if set(review["supporting_evidence"]) & set(review["contradicting_evidence"]):
+        raise ValueError("The same evidence cannot both support and contradict the same claim")
+    if set(review["invalid_evidence"]) & (set(review["supporting_evidence"]) | set(review["contradicting_evidence"])):
+        raise ValueError("An invalid evidence record cannot support or contradict a claim")
     if "request_constraint" not in review:
         raise ValueError("Reasonableness review must classify request_constraint as evidence-linked scope or null")
     constraint = review["request_constraint"]
@@ -179,28 +256,39 @@ def assess_assumption(agent, action, ledger, context):
             raise ValueError("Request classification must cite admitted requester evidence for this field and candidate value")
         text(constraint.get("reason"), "request constraint scope reason")
     # A bottleneck prevents impressive prose in one dimension hiding a missing one.
-    resolution = min(row["grade"] for row in criteria.values()) / 2
-    if verdict == "supported" and resolution < 1:
+    usable = min(row["grade"] for row in criteria.values()) / 2
+    if verdict == "supported" and usable < 1:
         incomplete = {name: row["grade"] for name, row in criteria.items() if row["grade"] < 2}
         raise ValueError(f"Supported verdict requires all rubric criteria to have grade 2; received {incomplete!r}. "
                          "Keep evidence-justified grades; use a compatible verdict and explicit limitations.")
     if verdict == "provisional" and not review["limitations"]:
         raise ValueError("Provisional assumptions require explicit limitations")
-    quality = resolution if verdict in {"supported", "provisional"} else 0.0
-    if verdict == "unsupported":
-        resolution = 0.0
+    quality = usable if verdict in {"supported", "provisional"} else 0.0
     declared = any(
         e.get("kind") == "request_constraint" and e.get("subject") == subject
         and ((field in UNITS and e.get("field") == field and e.get("value") == value)
              or (field in CONDITIONS and field in e.get("fields", ()))) for e in evidence.values())
     declared = declared or constraint is not None
-    if declared:
-        # Interpreting a supplied number is not new scientific justification.
-        resolution = 0.0
+    if verdict in {"supported", "provisional"} and not declared and not review["supporting_evidence"]:
+        raise ValueError("A supported or provisional scientific claim requires supporting evidence")
     key = identity([subject, field, value, claim["statement"] if field in CONDITIONS else None])
+    previous = ledger.assumptions.get(key, {})
+    learning = list(previous.get("learning_evidence", ()))
+    invalid = list(previous.get("invalidated_evidence", ()))
+    invalid.extend(evidence[ref] for ref in review["invalid_evidence"] if evidence[ref] not in invalid)
+    if not declared:
+        if verdict in {"supported", "provisional"}:
+            learning.extend({"relation": "supports", "evidence": evidence[ref]}
+                            for ref in review["supporting_evidence"])
+        # Refuting a newly invented, never-supported guess is not manufactured progress.
+        if any(row["relation"] == "supports" for row in previous.get("learning_evidence", ())):
+            learning.extend({"relation": "contradicts", "evidence": evidence[ref]}
+                            for ref in review["contradicting_evidence"])
+    learning = list({identity(row): row for row in learning}.values())
     assessment = {**claim, "key": key, "review": review, "evidence": evidence,
-                  "reasonableness": quality, "resolution_credit": resolution,
-                  "role": "request_constraint" if declared else "inferred_assumption"}
+                  "reasonableness": quality,
+                  "role": "request_constraint" if declared else "inferred_assumption",
+                  "learning_evidence": learning, "invalidated_evidence": invalid}
     assessment["version"] = identity(assessment)
     facts = ()
     if field in UNITS and quality > 0:
@@ -233,11 +321,18 @@ def frame_scenario(agent, action, ledger, context):
         return ResearchResult(scenarios=(existing,))
     review = agent({"operation": "review_scenario_scope", "proposal": scenario, "context": context,
                     "existing_scenarios": list(ledger.scenarios.values()),
+                    "source_evidence": [f.semantic_record() for f in ledger.facts.values()
+                                        if f.subject == scenario["subject"] and f.kind.startswith("source_")]
+                        + [e for e in ledger.evidence.values() if e["subject"] == scenario["subject"]
+                           and e.get("kind") == "source_evidence"],
                     "instruction": (
                         "Check alignment with the original request. A scenario identifies a case or "
                         "conditional experiment, not an equation, model extension or research topic. "
                         "A target receives the requested safety estimates; calibration and validation "
                         "scenarios identify distinct evidential cases. Reject topic-only scopes rather "
+                        "than an observed outbreak context: a fixed target scenario set still permits "
+                        "separate source-grounded calibration contexts, but no new target cases. Check "
+                        "the proposed event identity against source_evidence. Reject invented events rather "
                         "than treating them as additional target cases. Distinguish requester conditions "
                         "from agent-proposed study conditions. When cases are left open, an explicitly "
                         "conditional study case may instantiate that scope without claiming universality. "
@@ -257,41 +352,59 @@ def frame_scenario(agent, action, ledger, context):
     return ResearchResult(scenarios=(scenario,))
 
 
-def scientific_credit(result, focus, *, subjects=None):
+def scientific_credit(result, focus, *, subjects=None, outputs=None):
     """Project reviewed learning, not field presence or children's numeric scores."""
     rows = []
     subjects = (set(subjects) if subjects is not None else
                 {s["subject"] for s in result.scenarios if s.get("role", "target") == "target"})
     current = {a["key"]: a for a in result.assumptions}
+    from .records import Ledger
+    ledger = Ledger(result)
+    from .scenario_sharing import independent_groups
+    scoped_groups = independent_groups(ledger) if any(row.get("kind") == "group"
+        for row in result.scenario_parameter_relations) else ()
+    contracts = {s["subject"]: s.get("output_contracts", {}) for s in result.scenarios}
+    outputs = set(METRICS) if outputs is None else set(outputs)
+    calibration = calibration_progress(result) if CALIBRATION_PROGRESS in focus else None
+    linked_targets = target_calibration_progress(result, sorted(outputs), calibration=calibration) if calibration else {}
     for field in focus:
-        assessments = [a for a in result.assumptions if a["field"] == field]
-        score = 0.0
-        if field == "evidence_consistency" and subjects:
-            def checked(calculation):
-                if calculation["tool"] != "compare_predictions_with_observations":
-                    return 0.0
-                if calculation["output"]["category"] == "calibration_consistency":
-                    return 0.0
-                versions = calculation["assumption_versions"]
-                return min((current.get(k, {}).get("reasonableness", 0)
-                            if current.get(k, {}).get("version") == version else 0
-                            for k, version in versions.items()), default=0)
-            # Establishing a discrepancy is learning too; a smaller residual is not credit.
-            score = sum(max((checked(c) for c in result.calculations if c["subject"] == subject), default=0)
-                        for subject in subjects) / len(subjects)
-        elif field in METRICS and subjects:
-            def supported(estimate):
-                if not output_is_resolved(estimate["metrics"].get(field, {})):
-                    return 0.0
-                refs = estimate.get("assumption_keys", ())
-                versions = estimate.get("assumption_versions", {})
-                return min((current.get(k, {}).get("reasonableness", 0)
-                            if k not in versions or current.get(k, {}).get("version") == versions[k] else 0
-                            for k in refs), default=0)
-            score = sum(max((supported(e) for e in result.estimates if e["subject"] == subject), default=0)
-                        for subject in subjects) / len(subjects)
-        elif subjects:
-            score = sum(max((a["resolution_credit"] for a in assessments if a["subject"] == subject), default=0)
-                        for subject in subjects) / len(subjects)
-        rows.append((field, "reviewed_resolution", score))
-    return Credit(evaluated=result.evaluated, qualities=tuple(rows))
+        if field == CALIBRATION_PROGRESS:
+            score = max((max(PROVISIONAL_OUTPUT_CREDIT, row["support"])
+                for row in calibration["calibrations"] if row["outbreak_evidence_acquired"] and row["current"]), default=0)
+            rows.append((field, "workflow:outbreak_inversion", score))
+            for subject in sorted(subjects):
+                alternatives = linked_targets.get(subject, {}).get("alternatives", ())
+                score = max((sum(max(PROVISIONAL_OUTPUT_CREDIT, alternative["calibrated_support_by_quantity"].get(name, 0))
+                                 if alternative["calibrated_inputs_by_quantity"].get(name) else 0
+                                 for name in outputs) / len(outputs)
+                             for alternative in alternatives if alternative["coherent"] and outputs), default=0)
+                rows.append((field, "target:" + subject, score))
+            continue
+        if field not in outputs and field != "evidence_consistency":
+            groups = [group for group in scoped_groups if group["parameter"] == field
+                      and set(group["subjects"]).intersection(subjects)]
+            if groups:
+                for group in groups:
+                    learning = parameter_support(result, (field,), hypotheses_only=True,
+                                                 subjects=group["subjects"])
+                    rows.append((field, "group:" + group["group_id"],
+                                 learning[0]["points"] if learning else 0.0))
+                continue
+        for subject in sorted(subjects):
+            if field == "evidence_consistency":
+                # Establishing a discrepancy is learning too; a smaller residual is not credit.
+                score = max((current_support(c, current, ledger=ledger) for c in result.calculations
+                    if c["subject"] == subject and c["tool"] == "compare_predictions_with_observations"
+                    and c["output"]["category"] != "calibration_consistency"), default=0)
+            elif field in outputs:
+                score = max((max(current_support(e, current, metric=field, ledger=ledger),
+                                 PROVISIONAL_OUTPUT_CREDIT)
+                             for e in result.estimates
+                    if e["subject"] == subject and current_computation(e, current, field, ledger=ledger)
+                    and output_meets_contract(e["metrics"].get(field, {}), contracts.get(subject, {}).get(field))), default=0)
+            else:
+                learning = parameter_support(result, (field,), hypotheses_only=True, subjects=(subject,))
+                score = learning[0]["points"] if learning else 0.0
+            rows.append((field, subject, score))
+    return Credit(evaluated=result.evaluated, qualities=tuple(rows),
+                  quality_resolution=PROVISIONAL_OUTPUT_CREDIT / (max(1, len(outputs)) if calibration else 1))

@@ -12,10 +12,24 @@ from ..inhalation_hazard import steady_state_inhalation_transmission_rate
 from .physics import (
     clearance_time, critical_distance, critical_radius, exact_time_bound,
     integrated_concentration, maximum_total_occupancy, ratio,
-    threshold_distance, transient_concentration,
+    threshold_distance, transient_concentration, well_mixed_distance,
 )
+from .exposure import EXPOSURE_OUTPUTS, FIXED_FIELDS, MODEL_VERSION, calculate_exposure, model_inputs
 
 PAPER = "https://doi.org/10.1073/pnas.2018995118"
+
+# Meanings of model inputs, independent of any selected scenario or value.
+# These keep scope comparisons about the input itself rather than its effect on
+# a calculated risk. The paper distinguishes subpopulation/strain scaling from
+# exhaled quanta and treats masks and ventilation as separate inputs.
+PARAMETER_MEANINGS = {
+    "breathing_flow_m3_s": "Mean volume flow of air breathed by a person; can vary with physiology and respiratory activity.",
+    "quanta_concentration_exhaled_m3": "Infectious quanta per volume of exhaled air before masks; depends on the source and respiratory or vocal activity.",
+    "mask_penetration": "Fraction of respiratory aerosol passing through a face covering; depends on covering material and fit.",
+    "relative_transmissibility": "Relative susceptibility or transmissibility multiplier for a subpopulation or viral strain; the paper explicitly varies it by age group and strain.",
+    "deactivation_rate_s": "Airborne biological deactivation rate, separate from ventilation and filtration removal.",
+    "effective_radius_m": "Representative respiratory aerosol radius used in settling calculations; depends on droplet properties and emission context.",
+}
 
 
 @dataclass(frozen=True)
@@ -30,10 +44,32 @@ class Metric:
     interpretation: str = "Conditional model estimate, not a guarantee of safety."
 
     def as_record(self):
-        return {"name": self.name, "unit": self.unit, "inputs": list(self.inputs),
+        record = {"name": self.name, "unit": self.unit, "inputs": list(self.inputs),
                 "formula": self.formula, "reference": self.reference,
                 "source": PAPER, "regime": self.regime,
+                "parameter_constraints": self.parameter_constraints(),
                 "interpretation": self.interpretation}
+        if self.name in EXPOSURE_OUTPUTS:
+            operation, background = EXPOSURE_OUTPUTS[self.name]
+            record.update(operation=operation, background=background,
+                          model_family=MODEL_VERSION, near_field=self.regime.rsplit("_", 1)[1],
+                          fixed_fields=list(FIXED_FIELDS[operation]), result_form="scalar")
+        return record
+
+    def parameter_constraints(self):
+        """One contract for executable exclusions and agent capability information."""
+        constraints = []
+        jet = self.regime in {"jet", "random_jet"} or self.regime.endswith("_jet")
+        if jet:
+            constraints.append({"field": "mask_penetration", "operator": "equal", "value": 1,
+                "reason": "The continuous-jet model requires unmasked emission and inhalation"})
+        if self.regime == "clean_start_interpolation":
+            constraints.append({"field": "initial_concentration_quanta_m3", "operator": "equal", "value": 0,
+                "reason": "The interpolation assumes a clean start"})
+        if jet and "neighbor_distance_m" in self.inputs:
+            constraints.append({"field": "neighbor_distance_m", "operator": "minimum", "value": 0.1,
+                "reason": "Jet far-field approximation is not valid this close to the mouth"})
+        return constraints
 
 
 def metric(name, unit, inputs, formula, function, reference="Eq. 5", regime="well_mixed", interpretation=None):
@@ -54,14 +90,14 @@ def transient_args(v):
 _METRICS = (
     metric("equilibrium_droplet_radius_m", "m", "initial_radius_m solute_volume_fraction relative_humidity", "r0*(phi_s/(1-RH))^(1/3)", lambda v: v["initial_radius_m"] * (v["solute_volume_fraction"]/(1-v["relative_humidity"]))**(1/3), "The Well-Mixed Room, evaporation", "evaporation"),
     metric("droplet_evaporation_time_s", "s", "initial_radius_m evaporation_coefficient_m2_s relative_humidity", "r0^2/(theta*(1-RH))", lambda v: v["initial_radius_m"]**2/(v["evaporation_coefficient_m2_s"]*(1-v["relative_humidity"])), "The Well-Mixed Room, evaporation", "evaporation"),
-    metric("infectious_dose_virions", "virion", "microscopic_infectivity_per_virion", "1/ci", lambda v: ratio(1, v["microscopic_infectivity_per_virion"]), "Infectiousness of COVID-19", "microphysics", "Characteristic exponential dose giving probability 1-exp(-1), not a hard minimum infectious dose. Requires an infectious-virion basis, not unconverted RNA counts."),
+    metric("infectious_dose_virions", "virion", "microscopic_infectivity_per_virion", "1/ci", lambda v: ratio(1, v["microscopic_infectivity_per_virion"]), "Infectiousness", "microphysics", "Characteristic exponential dose giving probability 1-exp(-1), not a hard minimum infectious dose. Requires an infectious-virion basis, not unconverted RNA counts."),
     metric("microphysical_quanta_concentration_m3", "quanta/m3", "microscopic_infectivity_per_virion pathogen_concentration_virions_m3 aerosol_volume_fraction", "ci*cv*phi_a", lambda v: math.prod(v.values()), "Eq. 4, uniform virion concentration and infectivity", "microphysics"),
     metric("activity_rescaled_quanta_concentration_m3", "quanta/m3", "quanta_concentration_exhaled_m3 activity_aerosol_volume_fraction baseline_aerosol_volume_fraction", "Cq_baseline*phi_activity/phi_baseline", lambda v: v["quanta_concentration_exhaled_m3"] * v["activity_aerosol_volume_fraction"] / v["baseline_aerosol_volume_fraction"], "Fig. 2 activity rescaling", "microphysics", "Requires compatible pathogen, infectivity, humidity and size-cutoff assumptions for both measured distributions."),
     metric("quanta_emission_rate_s", "quanta/s", "breathing_flow_m3_s quanta_concentration_exhaled_m3", "Qb*Cq (before masks)", lambda v: v["breathing_flow_m3_s"] * v["quanta_concentration_exhaled_m3"], "Eq. 4"),
     metric("emission_rate_quanta_s", "quanta/s", "quanta_emission_rate_s mask_penetration", "Qb*Cq*pm (one source)", lambda v: v["quanta_emission_rate_s"] * v["mask_penetration"], "Eq. 1"),
     metric("settling_speed_m_s", "m/s", "effective_radius_m particle_density_kg_m3 air_density_kg_m3 air_dynamic_viscosity_pa_s gravity_m_s2", "2*(rho_d-rho_a)*g*r^2/(9*mu)", lambda v: stokes_settling_speed(v["effective_radius_m"], **{k: v[k] for k in ("particle_density_kg_m3", "air_density_kg_m3", "air_dynamic_viscosity_pa_s", "gravity_m_s2")}), "The Well-Mixed Room", "stokes"),
     metric("critical_aerosol_radius_m", "m", "air_exchange_rate_s room_height_m air_dynamic_viscosity_pa_s particle_density_kg_m3 air_density_kg_m3 gravity_m_s2", "sqrt(9*lambda_a*H*mu/(2*g*(rho_d-rho_a)))", lambda v: critical_radius(**v), "The Well-Mixed Room", "stokes"),
-    metric("air_mixing_time_s", "s", "room_volume_m3 ventilation_flow_m3_s recirculation_flow_m3_s", "V/(Q+Qr)", lambda v: ratio(v["room_volume_m3"], v["ventilation_flow_m3_s"] + v["recirculation_flow_m3_s"]), "The Well-Mixed Room", interpretation="Bulk-flow mixing timescale estimate; does not establish actual spatial uniformity."),
+    metric("air_mixing_time_s", "s", "room_volume_m3 ventilation_flow_m3_s recirculation_flow_m3_s", "V/(Q+Qr)", lambda v: ratio(v["room_volume_m3"], v["ventilation_flow_m3_s"] + v["recirculation_flow_m3_s"]), "The Well-Mixed Room", "bulk_flow", interpretation="Bulk-flow mixing timescale estimate; does not establish actual spatial uniformity."),
     metric("concentration_relaxation_time_s", "s", "removal_rate_s", "1/lambda", lambda v: ratio(1, v["removal_rate_s"]), "Eq. 1", "concentration_dynamics"),
     metric("air_clearance_time_s", "s", "removal_rate_s clearance_fraction", "-log(1-f)/lambda", lambda v: clearance_time(**v), "Eq. 1, source-off solution", "source_off", interpretation="Time to remove the specified fraction AFTER emissions stop, not while occupied by an infectious source."),
     metric("steady_concentration_quanta_m3", "quanta/m3", "emission_rate_quanta_s removal_capacity_m3_s", "Qb*Cq*pm/Qeff", lambda v: v["emission_rate_quanta_s"] / v["removal_capacity_m3_s"], "Eq. 1", "steady"),
@@ -104,14 +140,126 @@ _METRICS = (
 
 METRICS = {item.name: item for item in _METRICS}
 
+WELL_MIXED_DISTANCE = metric(
+    "risk_threshold_distance_m", "m", "risk_tolerance indoor_reproductive_number",
+    "0 if R_in <= epsilon, otherwise no finite separation",
+    lambda v: well_mixed_distance(**v), "Eq. 5, spatially uniform risk criterion",
+    "well_mixed_distance",
+    "Steady-background criterion, conditional on negligible near-field enhancement throughout the modeled occupied region. "
+    "Zero means no positive minimum imposed by the spatially uniform model, not safety at contact. "
+    "Infinity means separation cannot meet the room-risk criterion. The boundary uses <=; "
+    "neither branch guarantees safety or models mask leakage, local plumes or other routes.")
+
+
+def _exposure_metric(name, near_field):
+    operation, background = EXPOSURE_OUTPUTS[name]
+    inputs = (*model_inputs(background, near_field), *FIXED_FIELDS[operation])
+    if operation != "evaluate_R_in":
+        inputs += ("risk_tolerance",)
+    formula = {
+        "solve_time": "Solve B(t) + J*t/x_fixed = epsilon for t",
+        "solve_distance": "J*t_fixed/(epsilon-B(t_fixed)); explicit zero/no-finite-distance branches",
+        "evaluate_R_in": "B(t_fixed) + J*t_fixed/x_fixed",
+    }[operation]
+    interpretation = (
+        "Time, distance and R_in use the same R(t,x)=B(t)+J*t/x and named assumptions. "
+        "Bounds use <= and are not guarantees of safety. R_in is a linearized transmission measure, "
+        "not a bounded finite-population case count. "
+        + ("J=0 only under an explicit negligible-near-field hypothesis. Zero distance means no positive "
+           "minimum in this approximation, not safety at contact. " if near_field == "uniform" else
+           "Unmasked continuous-jet approximation; distances below 0.1 m are outside its domain. ")
+        + ("Transient B(t) uses the exact constant-source concentration integral. "
+           + ("The additive, immediately established local jet is a separate quasi-steady approximation, "
+              "not a transient-jet solution reported by the paper." if near_field == "jet" else "")
+           if background == "transient" else "B(t) uses steady background concentration.")
+    )
+    return metric(name, {"solve_time": "s", "solve_distance": "m", "evaluate_R_in": "scalar"}[operation],
+        " ".join(inputs), formula,
+        lambda v: calculate_exposure(v, operation=operation, background=background, near_field=near_field),
+        "Eqs. 1-3 and Eq. 7; transient local term requires a separate approximation",
+        f"exposure_{background}_{near_field}", interpretation)
+
+
+EXPOSURE_ROUTES = {name: tuple(_exposure_metric(name, near_field) for near_field in ("jet", "uniform"))
+                   for name in EXPOSURE_OUTPUTS}
+METRICS.update((name, routes[0]) for name, routes in EXPOSURE_ROUTES.items())
+
+
+def metric_routes(name):
+    """Alternative kernels for one requested quantity, not additional report goals."""
+    if name in EXPOSURE_ROUTES:
+        return EXPOSURE_ROUTES[name]
+    if name == "risk_threshold_distance_m":
+        return METRICS[name], WELL_MIXED_DISTANCE
+    return (METRICS[name],)
+
+
+def select_metric(name, conditions):
+    if name in EXPOSURE_ROUTES:
+        if {"continuous_unmasked_jet", "negligible_near_field"} <= set(conditions):
+            raise ValueError("Jet and negligible-near-field hypotheses require separate parameterizations")
+        return EXPOSURE_ROUTES[name][1 if "negligible_near_field" in conditions else 0]
+    if name == "risk_threshold_distance_m" and "negligible_near_field" in conditions:
+        if "continuous_unmasked_jet" in conditions:
+            raise ValueError("Select either a continuous-jet distance model or negligible near-field enhancement, not both in one parameterization")
+        return WELL_MIXED_DISTANCE
+    return METRICS[name]
+
+
+def metric_conditions(name, *, regime=None):
+    if name not in METRICS:
+        return set()
+    regime = regime or METRICS[name].regime
+    needed = {"well_mixed", "single_infectious_source", "uniform_breathing_and_masks"}
+    if regime.startswith("exposure_"):
+        needed.add("continuous_unmasked_jet" if regime.endswith("_jet") else "negligible_near_field")
+        if regime == "exposure_transient_jet":
+            needed.add("quasi_steady_local_plume")
+        return needed
+    if regime == "bulk_flow":
+        needed = set()
+    elif regime == "stokes":
+        needed = {"stokes_particles"}
+    elif regime == "evaporation":
+        needed = {"equilibrium_evaporation"}
+    elif regime == "microphysics":
+        needed = {"uniform_virion_infectivity"}
+    elif regime == "concentration_dynamics":
+        needed = {"well_mixed"}
+    elif regime == "source_off":
+        needed = {"well_mixed", "emissions_stopped"}
+    elif regime == "well_mixed_distance":
+        needed.add("negligible_near_field")
+    if regime in {"jet", "random_jet"}:
+        needed.add("continuous_unmasked_jet")
+    if regime == "random_jet":
+        needed.add("random_orientation_and_spacing")
+    return needed
+
+
+def metric_catalog_record(name):
+    record = METRICS[name].as_record()
+    record["routes"] = [{**route.as_record(),
+                         "conditions": sorted(metric_conditions(name, regime=route.regime))}
+                        for route in metric_routes(name)]
+    if name == "risk_threshold_distance_m" or name in EXPOSURE_OUTPUTS:
+        record["route_selection"] = (
+            "negligible_near_field explicitly selects the spatially uniform risk model; "
+            "otherwise the continuous-unmasked-jet kernel applies. The two conditions cannot "
+            "be selected together. Mask penetration alone never selects a route. A named "
+            "hypothesis may be calculated before support exists, but its support must be assessed. "
+            "Assuming away near-field exposure merely to fill distance coverage is not justification.")
+    return record
+
 
 def required_inputs(names):
     """Return leaf input requirements for a requested metric set."""
     result = set()
     def visit(name):
         if name in METRICS:
-            for dependency in METRICS[name].inputs:
-                visit(dependency)
+            for route in metric_routes(name):
+                for dependency in (*route.inputs, *(c["field"] for c in route.parameter_constraints())):
+                    visit(dependency)
         else:
             result.add(name)
     for name in names:

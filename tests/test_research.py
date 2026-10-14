@@ -49,6 +49,31 @@ def supported_review(request, *, grade=2, verdict="supported"):
             "explanation": "The synthetic source supports this conditional assumption; it is not independent validation."}
 
 
+def synthetic_information_review(request):
+    """Fixture judgments only; never a production substitute for semantic review."""
+    rows = []
+    for field in request["focus"]:
+        refs = [key for key in request["new_evidence"] if
+                request["evidence"][key].get("field") == field or field in request["evidence"][key].get("fields", ())]
+        rows.append({"field": field, "status": "resolved" if refs else "background",
+                     "answer": "Synthetic fixture establishes this value or condition" if refs else "No new fixture evidence",
+                     "evidence": refs, "limitations": ["Software fixture, not empirical validation"]})
+    return {"judgments": rows}
+
+
+def synthetic_synthesis(request):
+    result, retained = request["admitted_result"], request["retained_parent_context"]
+    def failures(options):
+        return [{"references": [key], "meaning": item.get("why", "Fixture failure"),
+                 "not_established": "No scientific disproof follows from a failed attempt"}
+                for key, item in options.items()]
+    return {"child_summary": {"findings": result["findings"], "uncertainties": result["unresolved"],
+                              "failures": failures(request["child_diagnostics"])},
+            "parent_summary": {"findings": list(dict.fromkeys([*retained["findings"], *result["findings"]])),
+                               "uncertainties": list(dict.fromkeys([*retained["uncertainties"], *result["unresolved"]])),
+                               "failures": failures(request["parent_diagnostics"])}}
+
+
 class AdaptiveAgent:
     def __init__(self, subjects=("target",)):
         self.requests = []
@@ -121,9 +146,10 @@ class AdaptiveAgent:
                                   for item in request["candidates"]]}
         if op == "review_research_model":
             return {"admit": True, "reason": "Consistent synthetic model inputs", "limitations": ["Conditional model, not independent validation"]}
+        if op == "assess_information_progress":
+            return synthetic_information_review(request)
         if op == "synthesize_research_findings":
-            return {"findings": request["admitted_result"]["findings"],
-                    "uncertainties": request["admitted_result"]["unresolved"]}
+            return synthetic_synthesis(request)
         raise AssertionError(op)
 
 
@@ -199,10 +225,13 @@ class ResearchControlTests(unittest.TestCase):
         self.assertTrue(all("JSON-escape backslashes" in call.kwargs["system_prompt"] for call in calls.call_args_list))
         for call in calls.call_args_list:
             system = call.kwargs["system_prompt"]
-            self.assertIn("For calculation execution, select admitted inputs", system)
+            self.assertIn("For calculation execution, select recorded facts or numeric assumption options", system)
             self.assertIn("Within investigate", system)
             self.assertIn("values need not have been printed verbatim", system)
             self.assertIn("mandatory independent reasonableness assessment", system)
+            self.assertIn("calculated without evidence support", system)
+            self.assertIn("not permission to compute", system)
+            self.assertNotIn("not admitted facts or calculation inputs until", system)
             self.assertNotIn("When proposing a scientific alternative, use only admitted facts", system)
 
     def test_one_scenario_cannot_complete_another_scenario(self):
@@ -384,11 +413,13 @@ class ResearchAdmissionTests(unittest.TestCase):
         self.assertFalse(result.facts)
         self.assertIn("Different activity", result.issues[0])
 
-    def test_evaluation_requires_assessed_inputs_not_filled_fields(self):
+    def test_evaluation_does_not_require_evidence_support(self):
         facts = {"fact:1": Fact("target", "mask_penetration", .3, "fraction", "user_assumption", "test")}
-        with self.assertRaisesRegex(ValueError, "reasonableness"):
-            evaluate_model(AdaptiveAgent(), {"subject": "target", "facts": ["fact:1"]}, facts,
-                {"defined_scenarios": {"target": {"parameters": {"mask_penetration": 1}}}}, METRICS)
+        result = evaluate_model(AdaptiveAgent(), {"subject": "target", "facts": ["fact:1"],
+            "basis": "Synthetic hypothesis"}, facts, {}, METRICS)
+        self.assertTrue(result.estimates)
+        self.assertEqual(result.estimates[0]["reasonableness"], 0)
+        self.assertTrue(result.estimates[0]["support_issues"])
 
     def test_llm_cannot_stop_loop(self):
         providers = ResearchProviders(lambda _: {"action": "stop"}, lambda *_: (), lambda _: None)
