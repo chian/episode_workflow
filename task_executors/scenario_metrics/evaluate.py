@@ -276,12 +276,20 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
                 row["applicability_warning"] = "The inferred distance lies below the approximate jet virtual-origin scale; do not interpret it as a validated separation."
             values[name] = answer
             dependencies[name] = metric_dependencies[name]
+            # Preserve computed canonical intermediates for reuse and dependency
+            # tracking, including metrics evaluated recursively inside an output.
+            if name in UNITS and name not in parameters and math.isfinite(answer):
+                derivations[name] = {"inputs": list(inputs), "formula": m.formula, "value": answer}
+                derived_dependencies[name] = metric_dependencies[name]
         except (ValueError, ZeroDivisionError, OverflowError) as exc:
             row.update(status="undefined", missing=[str(exc)])
         return row
 
     requested = {name: compute(name) for name in metrics}
+    intermediates = {name: row for name, row in outputs.items() if name not in requested}
     return {"subject": subject, "label": label, "metrics": requested,
+            "intermediate_outputs": intermediates,
+            "intermediate_dependencies": {name: metric_dependencies[name] for name in intermediates},
             "parameters": dict(parameters), "derived_parameters": derivations,
             "metric_dependencies": {name: metric_dependencies[name] for name in metrics},
             "derived_dependencies": derived_dependencies,

@@ -184,12 +184,16 @@ def check_case_inputs(definition, parameters, conditions=()):
     """Scope constraints, not an evidence-quality gate."""
     if not definition.get("scope_locked"):
         return
+    from .model_defaults import retained_defaults
+    defaults = retained_defaults(definition)
     for field, value in parameters.items():
         if field in definition["calculation_variables"]:
             raise ValueError(f"{field} is a calculation variable for this case, not a freely chosen scenario assumption")
         fixed = definition["fixed_parameters"].get(field)
         if fixed is not None and value != fixed["value"]:
             raise ValueError(f"{field} conflicts with the fixed scenario condition")
+        if field in defaults and value != defaults[field]["value"]:
+            raise ValueError(f"{field} conflicts with the retained model baseline; its scenario plan did not promote it")
     for field, statement in dict(conditions).items():
         fixed = definition["fixed_conditions"].get(field)
         if fixed is not None and statement != fixed:

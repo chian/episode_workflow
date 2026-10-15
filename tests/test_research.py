@@ -46,6 +46,9 @@ def supported_review(request, *, grade=2, verdict="supported"):
                                 "evidence": list(request["evidence"])} for name in RUBRIC},
             "limitations": ["Synthetic fixture; not empirical validation"],
             "alternatives": ["Other activities need separate evidence"], "missing_evidence": [],
+             "supporting_evidence": list(request["evidence"]) if verdict in {"supported", "provisional"} else [],
+             "contradicting_evidence": list(request["evidence"]) if verdict == "contradicted" else [],
+             "invalid_evidence": [],
             "explanation": "The synthetic source supports this conditional assumption; it is not independent validation."}
 
 
@@ -99,7 +102,6 @@ class AdaptiveAgent:
             calculated = {m for c in request["calculations"].values() for m in c["output"]}
             action = "calculate_transmission_metrics" if "indoor_reproductive_number" not in calculated else "calculate_conditional_limits"
             return {**common, "action": action, "subject": subject,
-                    "facts": [k for k, f in facts.items() if f["subject"] == subject and f["field"] in needed],
                     "conditions": CONDITIONS, "basis": "Explicitly assessed synthetic assumptions"}
         if op == "propose_investigation_strategy":
             return {"approach": "Find evidence for the synthetic physical and infectiousness hypotheses",
@@ -225,7 +227,7 @@ class ResearchControlTests(unittest.TestCase):
         self.assertTrue(all("JSON-escape backslashes" in call.kwargs["system_prompt"] for call in calls.call_args_list))
         for call in calls.call_args_list:
             system = call.kwargs["system_prompt"]
-            self.assertIn("For calculation execution, select recorded facts or numeric assumption options", system)
+            self.assertIn("main table", system)
             self.assertIn("Within investigate", system)
             self.assertIn("values need not have been printed verbatim", system)
             self.assertIn("mandatory independent reasonableness assessment", system)
@@ -414,8 +416,8 @@ class ResearchAdmissionTests(unittest.TestCase):
         self.assertIn("Different activity", result.issues[0])
 
     def test_evaluation_does_not_require_evidence_support(self):
-        facts = {"fact:1": Fact("target", "mask_penetration", .3, "fraction", "user_assumption", "test")}
-        result = evaluate_model(AdaptiveAgent(), {"subject": "target", "facts": ["fact:1"],
+        facts = (Fact("target", "mask_penetration", .3, "fraction", "user_assumption", "test"),)
+        result = evaluate_model(AdaptiveAgent(), {"subject": "target",
             "basis": "Synthetic hypothesis"}, facts, {}, METRICS)
         self.assertTrue(result.estimates)
         self.assertEqual(result.estimates[0]["reasonableness"], 0)

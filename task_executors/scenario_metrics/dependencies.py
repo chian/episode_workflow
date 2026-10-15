@@ -38,6 +38,13 @@ PARAMETER_DERIVATIONS = (
 )
 DERIVED_NAMES = frozenset(d.output for d in PARAMETER_DERIVATIONS)
 
+# These registered calculations remain usable inputs, but are not initial
+# parameter-discovery goals. Reversible geometry inputs are deliberately separate.
+CALCULATED_PARAMETER_FIELDS = frozenset({
+    "quanta_emission_rate_s", "settling_speed_m_s",
+    "removal_capacity_m3_s", "removal_rate_s",
+})
+
 
 def fixed_input_fields(available, conditions=()):
     """Inputs supplied directly or derivable entirely from caller-fixed inputs."""

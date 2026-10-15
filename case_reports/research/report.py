@@ -9,9 +9,10 @@ from ...method_loop import ClosedRecord
 from ...task_executors.scenario_metrics.catalog import METRICS, PAPER, metric_catalog_record
 from ...task_executors.scenario_metrics.evaluate import output_has_exclusion, output_meets_contract, exposure_outputs_agree
 from ...task_executors.scenario_metrics.dependencies import input_requirements
-from .records import cited_assessment_evidence, current_support, current_computation, assumption_matches, Ledger
+from .records import cited_assessment_evidence, current_support, assumption_matches, Ledger
 from .communication import reading_coverage
 from .verification import calibration_progress, live_acceptance, target_calibration_progress
+from .calculation_steps import calculation_is_up_to_date, calculation_step_status
 
 
 def scenario_results(result, metrics):
@@ -21,18 +22,21 @@ def scenario_results(result, metrics):
     complete = bool(definitions)
     assessments = {a["key"]: a for a in result.assumptions}
     ledger = Ledger(result)
+    steps = {(row["subject"], row["field"]): row
+             for row in calculation_step_status(result, metrics)["steps"]}
     for subject in definitions:
         contracts = definitions[subject].get("output_contracts", {})
         alternatives = [e for e in result.estimates if e["subject"] == subject]
         alternatives = [{**e, "metrics": {name: row for name, row in e["metrics"].items() if name in metrics}}
                         for e in alternatives]
         alternatives = [{**e, "current_reasonableness": current_support(e, assessments, ledger=ledger),
-                         "current_computed_metrics": [m for m in e["metrics"] if current_computation(e, assessments, m, ledger=ledger)
-                             and output_meets_contract(e["metrics"][m], contracts.get(m))],
+                         "current_computed_metrics": [m for m in e["metrics"]
+                             if calculation_is_up_to_date(e, m, ledger)],
                          "current_metric_support": {m: current_support(e, assessments, metric=m, ledger=ledger) for m in e["metrics"]}}
                         for e in alternatives]
         coverage = {}
         for name in metrics:
+            step = steps[(subject, name)]
             rows = [e["metrics"].get(name, {"status": "not_evaluated"}) for e in alternatives]
             current_rows = [e["metrics"].get(name, {"status": "not_evaluated"}) for e in alternatives
                             if e["current_metric_support"].get(name, 0) > 0]
@@ -51,7 +55,9 @@ def scenario_results(result, metrics):
                         "support": e["current_metric_support"].get(name, 0)}
                        for e in alternatives if name in e["current_computed_metrics"]]
             coverage[name] = {
-                "computed": bool(figures), "recorded_computation": historical,
+                "computed": step["status"] == "calculated_up_to_date",
+                "recorded_computation": step["status"] != "not_calculated",
+                "calculation_status": step["status"],
                 "output_contract": contracts.get(name),
                 "figures": sorted(figures, key=lambda f: f["support"], reverse=True),
                 "status": "calculated" if calculated else "inapplicable" if excluded else (
@@ -89,18 +95,39 @@ def scenario_results(result, metrics):
     return scenarios, complete
 
 
-def scientific_progress(result, metrics):
+def scientific_progress(result, metrics, *, decision_view=False):
     """Give the scientific parent the same current-coverage view as closure."""
     scenarios, _ = scenario_results(result, metrics)
     calibration = calibration_progress(result)
     calibration_targets = target_calibration_progress(result, metrics, calibration=calibration)
     assessments = {a["key"]: a for a in result.assumptions}
     ledger = Ledger(result)
+    if decision_view:
+        # Describe calculated source values without exposing a target-input selector.
+        outputs = {fact.key: {name: getattr(fact, name)
+                   for name in ("subject", "field", "value", "unit")}
+                   for fact in ledger.facts.values()}
+
+        def referenced(keys):
+            return [outputs.get(key, {"available": False}) for key in keys]
+
+        calibration = {**calibration, "calibrations": [
+            {**{key: value for key, value in row.items() if key != "output_fact_keys"},
+             "outputs": referenced(row.get("output_fact_keys", ()))}
+            for row in calibration["calibrations"]]}
+        calibration_targets = {subject: {**target, "alternatives": [
+            {**alternative, "calibrated_inputs_by_quantity": {
+                name: referenced(keys) for name, keys in
+                alternative["calibrated_inputs_by_quantity"].items()}}
+            for alternative in target["alternatives"]]}
+            for subject, target in calibration_targets.items()}
     from .scenario_sharing import applicable_assumptions
+    from .tools import main_calculation_inputs
     targets = {}
     for subject, scenario in scenarios.items():
         scoped = [a for a, _relation in applicable_assumptions(ledger, subject)]
         active = [a for a in scoped if a["reasonableness"] > 0]
+        main_inputs = main_calculation_inputs(ledger, subject)
         needs = {}
         recalculation = []
         for alternative in scenario["alternatives"]:
@@ -138,8 +165,7 @@ def scientific_progress(result, metrics):
         targets[subject] = {
             "calibration_linkage": calibration_targets[subject],
             "input_requirements": input_requirements(metrics,
-                {f.field for f in result.facts if f.subject == subject}
-                | {a["field"] for a in scoped if a["value"] is not None},
+                {fact.field for fact in main_inputs},
                 {a["field"] for a in scoped if a["value"] is None},
                 scenario["definition"].get("calculation_variables", ())),
             "coverage": scenario["coverage"],
@@ -238,19 +264,17 @@ class ResearchReport(ClosedRecord):
                         "rarefaction": record.controller_state.rarefaction,
                         "model_calls": run.model_calls, "total_units": run.total_units,
                         "limits": vars(run.limits),
-                        "method": ("Evidence-linked assumption resolution and requested calculated outputs are separately weighted. "
-                                   if run.fixed_scenarios else "Evidence-linked assumption resolution, calculated outputs, and evidence-consistency checks are separately weighted. ") +
-                        "A current computation meeting its requested output contract earns a 1/8 progress floor even without evidence support; "
-                        "stronger supported-output credit replaces that floor, not adds to it. Repetition earns no gain. "
-                        "A current outbreak inversion contributes once; each target separately receives credit for using "
-                        "that calibration in its requested quantities. Completion requires support and calibration lineage "
-                        "in the same coherent parameterization, not different alternatives. "
-                        "Input-resolution credit includes executable derivation prerequisites; only requested outputs receive output credit. "
-                        "Progress is additive across scoped scenarios, not averaged over a growing target list; an empty scenario earns zero. "
-                        "Credit can exceed one and is not a completion fraction. Investigation and strategy credit group related source-event types and weight acquired fields by assessed target relevance. "
-                        "The shared Goal also gives admitted, current source-to-target relationships a capped 0.1 weight across target input needs; repeated sources cannot multiply the same need. "
-                        "It commits after every child verdict and projects root credit before the root receives that child. Parent recomputes credit; rolling marginal yield controls continuation. "
-                        "Operational heuristic, not calibrated confidence.",
+                        "method": "Found-parameter learning and calculation-step progress are separate additive components, each with weight 1. "
+                        "Retained physical defaults and calculated intermediates are excluded from values-to-find coverage. "
+                        "An executed, accepted calculation earns 0.125: 0.025 for reusable completed work and 0.100 for a current result. "
+                        "Requested outputs use the greater of that floor and current support. When dependencies become stale, "
+                        "only 0.025 remains; recalculation restores current-result credit. Enumeration, unsuccessful calls and repetition earn no gain. "
+                        "Intermediate steps retain their own dependencies and are optional routes, not additional requested conclusions. "
+                        "Found-parameter learning retains its evidence scoring independently of calculation validity. "
+                        "Completion requires supported requested outputs and calibration lineage in a coherent parameterization. "
+                        "Credit can exceed one and is not a completion fraction. Shared credit and the calculation table update "
+                        "after each committed verdict, including the suspended root before child return. Refreshes do not create "
+                        "yield observations; rolling marginal yield still controls continuation. Operational heuristic, not calibrated confidence.",
                         "input_boundary": ("Runtime disease input and caller-selected fixed scenario conditions; no seeded scientific answers or research evidence."
                                            if run.fixed_scenarios else "Original prompt only; no preloaded scenario parameters or seeded evidence.")},
             "validation": {
@@ -311,17 +335,51 @@ class ResearchReport(ClosedRecord):
                 lines.extend(["Unmet runtime requirements: " + ", ".join(acceptance["missing"]) + ".", ""])
         progress = self.data.get("computational_progress")
         if progress:
-            lines.extend([f"Computed requested quantities: {progress['calculated_quantities']}/{progress['requested_quantities']}. "
-                          f"Coherent provisional solution available: {progress['coherent_provisional_solution_available']}. "
+            lines.extend([f"Coherent provisional solution available: {progress['coherent_provisional_solution_available']}. "
                           f"Evidence status: {self.data['evidence_status']}.", ""])
-        for subject, scenario in self.data["scenarios"].items():
-            lines.extend([f"## {subject}", "", scenario["definition"].get("description", ""), "",
-                          "| Requested Quantity | Current Status | Missing Information or Applicability |",
-                          "| --- | --- | --- |"])
-            for name, coverage in scenario["coverage"].items():
-                notes = [*coverage["missing"], *(a["reason"] for a in coverage.get("applicability", []))]
-                lines.append(f"| {cell(name)} | {coverage['status']} | {cell('; '.join(notes))} |")
+        goal = self.data.get("global_scientific_goal", {})
+        found = goal.get("recorded_target_inputs")
+        if found:
+            lines.extend([f"{found['recorded']}/{found['required']} values found.", ""])
+        calculations = goal.get("calculation_steps", {})
+        if calculations.get("steps"):
+            scores = goal.get("scores", {})
+            status_labels = {"not_calculated": "not calculated",
+                "calculated_up_to_date": "calculated & up to date",
+                "calculated_needs_updating": "calculated needs updating"}
+            lines.extend(["## Calculation Progress", "",
+                f"Found-parameter credit: {scores.get('found_parameters', 0):.3f}. "
+                f"Calculation-step credit: {scores.get('calculation_steps', 0):.3f}.", "",
+                "Optional steps earn credit when executed. A stale result retains 0.025 for prior completed work; "
+                "its current-result credit returns after recalculation. Ready means inputs are available for an explicit choice.", "",
+                "| Target scenario | Calculation | Kind | Computed value | Units | Status | Credit | Ready | Changed inputs / reason |",
+                "| --- | --- | --- | ---: | --- | --- | ---: | --- | --- |"])
+            for step in calculations["steps"]:
+                changes = []
+                if step["status"] == "calculated_needs_updating":
+                    changes = list(dict.fromkeys(change.get("field") or change["reason"]
+                        for alternative in step.get("result_alternatives", ())
+                        for change in alternative.get("changed_dependencies", ())))
+                if step.get("uncredited_reason"):
+                    changes.append(step["uncredited_reason"])
+                if step.get("credit_basis"):
+                    changes.append(step["credit_basis"])
+                for difference in step.get("main_input_differences", ()):
+                    changes.append(
+                        f"{difference['field']}: calculation used "
+                        f"{difference['used_value']} {difference['used_unit']}; main table selects "
+                        f"{difference['current_selected_value']} {difference['current_selected_unit']}")
+                value = step.get("computed_value")
+                if isinstance(value, dict):
+                    value = value.get("expression", value)
+                lines.append(f"| {cell(step['subject'])} | {cell(step['field'])} | {cell(step['kind'])} | "
+                             f"{cell(value) if value is not None else '—'} | {cell(step.get('unit') or '—')} | "
+                             f"{status_labels[step['status']]} | "
+                             f"{step['points']:.3f} | {'yes' if step['ready_to_calculate'] else 'no'} | "
+                             f"{cell('; '.join(changes))} |")
             lines.append("")
+        for subject, scenario in self.data["scenarios"].items():
+            lines.extend([f"## {subject}", "", scenario["definition"].get("description", ""), ""])
             figures = [(name, figure) for name, coverage in scenario["coverage"].items()
                        for figure in coverage.get("figures", [])]
             if figures:
@@ -343,8 +401,8 @@ class ResearchReport(ClosedRecord):
             for alternative in scenario["alternatives"]:
                 if not alternative["metrics"]:
                     continue
-                lines.extend([f"### {alternative['label']}", "", "| Quantity | Value | Unit | Status | Support | Limitations |",
-                              "| --- | ---: | --- | --- | --- | --- |"])
+                lines.extend([f"### {alternative['label']}", "", "| Quantity | Recorded Value | Unit | Support | Limitations |",
+                              "| --- | ---: | --- | --- | --- |"])
                 for name, row in alternative["metrics"].items():
                     quality = alternative["current_metric_support"][name]
                     support = "not established" if not quality else "supported" if quality == 1 else "provisional"
@@ -353,7 +411,7 @@ class ResearchReport(ClosedRecord):
                              row.get("interpretation", "") if row.get("regime") == "well_mixed_distance" or row.get("model_id") else "",
                              row.get("applicability", {}).get("reason", ""),
                              *alternative.get("metric_support", {}).get(name, {}).get("support_issues", ())]
-                    lines.append(f"| {cell(name)} | {quantity(row)} | {cell(row.get('unit', ''))} | {row['status']} | {support} | {cell('; '.join(n for n in notes if n))} |")
+                    lines.append(f"| {cell(name)} | {quantity(row)} | {cell(row.get('unit', ''))} | {support} | {cell('; '.join(n for n in notes if n))} |")
                 qualities = set(alternative["current_metric_support"].values())
                 support = ("mixed; see individual quantities" if len(qualities) > 1 else
                            "not established; exploratory calculation only" if not any(qualities) else

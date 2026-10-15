@@ -3,7 +3,7 @@
 from urllib.parse import urlsplit, urlunsplit
 
 from ...task_executors.scenario_metrics.dependencies import input_fields
-from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS
+from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter
 from .modeling import DERIVATIONS, derivation_inputs
 from .records import Credit, identity
 
@@ -111,3 +111,57 @@ def parameter_support(result, requirements, *, hypotheses_only=False, subjects=(
 def progress_credit(rows, *, evaluated):
     return Credit(evaluated=evaluated, quality_resolution=ADDITIONAL_SUPPORT,
                   qualities=tuple((PARAMETER_EVIDENCE, row["field"], row["points"]) for row in rows))
+
+
+def found_parameter_progress(result, *, ledger=None):
+    """One discovery floor per independent target value, separate from its support.
+
+    Source records alone are evidence, not target assignments. Review grades and
+    applicability qualify an assigned value; they do not erase its discovery.
+    """
+    from .records import Ledger
+    from .scenario_sharing import independent_groups
+    from .target_values import target_value_preference
+
+    ledger = ledger if ledger is not None else Ledger(result)
+    invalid = {evidence_key(record) for assessment in ledger.assumptions.values()
+               for record in assessment.get("invalidated_evidence", ())}
+    rows = []
+    for group in independent_groups(ledger):
+        field = group["parameter"]
+        candidates = []
+        for assessment in ledger.assumptions.values():
+            if (assessment.get("subject") not in group["subjects"]
+                    or assessment.get("field") != field
+                    or assessment.get("source_candidate_unavailable")
+                    or assessment.get("role") in
+                    {"scenario_constraint", "request_constraint", "model_default"}):
+                continue
+            try:
+                validate_parameter(field, assessment.get("value"), assessment.get("unit"))
+            except ValueError:
+                continue
+            candidates.append(assessment)
+        reviewed = [row for row in candidates
+                    if row.get("review", {}).get("verdict") in {"supported", "provisional"}]
+        selected = max(candidates, key=target_value_preference) if candidates else None
+        # Preserve the existing evidence-learning increment without creating a
+        # second discovery point when evidence later supports the same value.
+        learning = [row for assessment in candidates for row in assessment.get("learning_evidence", ())
+                    if evidence_key(row["evidence"]) not in invalid and _source(row["evidence"])]
+        sources = _distinct_sources(row["evidence"] for row in learning)
+        bonus = (ADDITIONAL_SUPPORT * max(0, len(sources) - 1)
+                 if any(row["relation"] == "supports" for row in learning) else 0.0)
+        rows.append({"group_id": group["group_id"], "parameter": field,
+            "subjects": group["subjects"], "found": bool(candidates),
+            "reviewed": bool(reviewed),
+            "origin_subject": selected["subject"] if selected else None,
+            "selected_assumption_key": selected["key"] if selected else None,
+            "value": selected["value"] if selected else None,
+            "unit": selected["unit"] if selected else UNITS.get(field),
+            "source_applicability": selected.get("source_applicability") if selected else None,
+            "review_verdict": selected.get("review", {}).get("verdict", "unassessed") if selected else None,
+            "discovery_points": 1.0 if candidates else 0.0,
+            "learning_bonus": round(bonus, 10),
+            "points": round((1.0 if candidates else 0.0) + bonus, 10)})
+    return rows

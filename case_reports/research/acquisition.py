@@ -5,7 +5,6 @@ from dataclasses import replace
 import asyncio
 import json
 
-from ...method_loop import SourceEnd
 from ...method_loop.episode_binding.web_search_binding import SearchPageProposer
 from ...task_executors._http import ProviderError
 from ...task_executors.outbreak_search.queries import (
@@ -15,8 +14,9 @@ from .admission import extract_and_admit, exact_span
 from .assumptions import text as required_text
 from .documents import Document, Span, rank_spans
 from .communication import merged_ranges, reading_coverage
-from .engine import ResearchSource, selected_choice
+from .engine import ResearchSource, changed_records, selected_choice
 from .model_tiers import ModelTier, TABLE_PAGE_EXTRACTION_TIER
+from .progress import parameter_requirements
 from .records import Ledger, ResearchResult, identity
 from .relevance import (
     assess_source_types, assess_source_types_with_jev, source_profiles,
@@ -48,14 +48,15 @@ class StrategySource(ResearchSource):
             return result
         shared = getattr(getattr(self.run, "global_goal", None), "ledger", None)
         working = Ledger(shared.result() if shared is not None else self.ledger.result())
-        working.merge(self.ledger.result())
-        working.merge(result)
+        working.merge(changed_records(result, self.ledger.result()))
         self.event_types.update((row["type_id"], dict(row)) for row in working.source_event_types.values())
         self.relationships.update(((row["source"], row["source_subject"], row["target_subject"], row["parameter"]), dict(row))
                                   for row in working.source_target_relationships.values())
         targets = {name: target_comparison_context({**definition, "subject": name},
                     working.assumptions.values()) for name, definition in scoped_targets.items()}
-        profiles = source_profiles(working.result(), self.parameter_requirements)
+        # Relation fingerprints share the canonical comparison context with the
+        # central value grader; local scored fields still exclude defaults.
+        profiles = source_profiles(working.result(), parameter_requirements(self.parameter))
         versions = {}
         for source in {locator for locator, _ in profiles}:
             versions[source] = identity({"subjects": {subject: profile for (locator, subject), profile in profiles.items()
@@ -84,7 +85,6 @@ class StrategySource(ResearchSource):
             previous_relationships = tuple(row for key, row in relationships.items() if key[0] == source)
             for group in groups.values():
                 group["members"] = [member for member in group["members"] if member[0] != source]
-            relationships = {key: row for key, row in relationships.items() if key[0] != source}
             subjects = sorted(subject for locator, subject in profiles if locator == source)
             batch_size = len(subjects) if jev_assessor is not None else SOURCE_ASSESSMENT_BATCH_SIZE
             for start in range(0, len(subjects), batch_size):
@@ -113,8 +113,12 @@ class StrategySource(ResearchSource):
                     group.update(description=decision["description"], basis=decision["basis"],
                                  target_relevance=dict(decision["target_relevance"]))
                     group["members"].extend([source, subject] for subject in decision["subjects"])
-                relationships.update(((row["source"], row["source_subject"], row["target_subject"], row["parameter"]), row)
-                                     for row in assessed_relations)
+                for row in assessed_relations:
+                    key = (row["source"], row["source_subject"], row["target_subject"], row["parameter"])
+                    # Event-level relevance serves the existing acquisition
+                    # handoff. It must not replace value-specific target grades.
+                    if "source_value_scores" not in relationships.get(key, {}):
+                        relationships[key] = row
             if failure:
                 break
             processed.append(source)
@@ -130,7 +134,7 @@ class StrategySource(ResearchSource):
 
     def propose(self, view):
         if self.evidence_handoff_ready():
-            return SourceEnd("parameter_evidence_ready_for_assessment")
+            return None
         proposal = self.run.agent(self.inputs(view, operation="propose_strategy_query",
             approach=self.approach, previous_queries=self.queries,
             search_execution={
@@ -138,11 +142,12 @@ class StrategySource(ResearchSource):
                 "result": "Source candidates, not execution of a browsing plan. The search episode selects sources; page and reading episodes retrieve and examine their content.",
             },
             instruction=(
-                "Propose a search addressing the delegated uncertainty and unadmitted hypotheses in the parent information contract. "
+                "Propose a search addressing the delegated uncertainty and unresolved hypotheses in the parent information contract. "
                 "Use prior findings and failure implications to distinguish resolved from open questions. "
                 "Your investigation parent owns candidate assumption proposals and their reasonableness "
-                "assessment. This subtree returns source evidence, bounds and applicability information; "
-                "it cannot record target-case hypotheses on the parent's behalf. "
+                "assessment of inferred hypotheses. Every extracted native numeric value is automatically "
+                "compared with target parameter needs and added to matching target groups. The highest "
+                "value-specific source relevance selects the main-table value and updates shared credit. "
                 "The query field is search text, not instructions to an agent. Use searchable terms, identifiers, "
                 "phrases or a concise search question. Instructions to open URLs, inspect XML, follow links, "
                 "extract equations or stop are not executed by the search provider. Put the information need "
@@ -151,8 +156,9 @@ class StrategySource(ResearchSource):
                 "in query does not establish that it was attempted. A source inventory or another equation "
                 "mention is not progress unless the contract needs it. The original research request is context, "
                 "not a requirement to explore every topic. Numerical yield controls continuation. "
-                "The assigned calculation parameter and its scoring criteria are fixed. A query "
-                "or objective may guide where to look, but cannot add scored requirements. "
+                "The assigned parameter guides this search. Credit uses the shared target-value and "
+                "calculation tables; useful values for other target parameters also count automatically. "
+                "A query or objective cannot add scored requirements. "
                 "Give the child only its specific information question, including necessary context. "
                 "Its brief return should explain trends and implications for your next decision. "
                 "Do not repeat an identical query."),
@@ -198,7 +204,7 @@ class SearchSource(ResearchSource):
 
     def propose(self, view):
         if self.evidence_handoff_ready():
-            return SourceEnd("parameter_evidence_ready_for_assessment")
+            return None
         self.view = view
         candidate = asyncio.run(self.proposer.next(self.goal))
         if candidate is None:
@@ -229,8 +235,8 @@ class PageSource(ResearchSource):
         _init_relevance_state(self)
 
     def assess(self, result):
-        # Review source-to-target relationships as page evidence arrives, before
-        # the search and strategy parents finish their own episodes.
+        # Restore event classification/local handoff; numeric target projection
+        # additionally happens centrally on every reading commit.
         return StrategySource.assess(self, result)
 
     def prepare(self):
@@ -253,7 +259,7 @@ class PageSource(ResearchSource):
 
     def propose(self, view):
         if self.evidence_handoff_ready():
-            return SourceEnd("parameter_evidence_ready_for_assessment")
+            return None
         if self.document is None:
             try:
                 self.prepare()
@@ -264,14 +270,37 @@ class PageSource(ResearchSource):
                                                           for d in failed.diagnostics))
                 return self.leaf(lambda: failed, "retrieval_failure")
         document = self.document
+        page_task = identity([str(self.goal.objective), self.context()])
+        attempts = [attempt for attempt in self.ledger.reading_attempts.values()
+                    if attempt["source"] == document.source
+                    and attempt["source_version"] == document.sha256]
         document.examined_ranges = merged_ranges([*document.examined_ranges,
-            *(pair for attempt in self.ledger.reading_attempts.values()
-              if attempt["source"] == document.source and attempt["source_version"] == document.sha256
-              and attempt["status"] != "not_started" for pair in attempt["ranges"])])
+            *(pair for attempt in attempts
+              if attempt["status"] != "not_started" for pair in attempt["ranges"])])
+        unread = document.remaining()
+        reviewed = merged_ranges(pair for attempt in attempts if attempt["status"] == "completed"
+                                 for pair in attempt["ranges"])
+        fully_reviewed = all(any(start <= span.start and end >= span.end for start, end in reviewed)
+                             for span in document.spans)
+        task_attempts = [attempt for attempt in attempts if attempt.get("page_task") == page_task]
+        task_reviewed = merged_ranges(pair for attempt in task_attempts if attempt["status"] == "completed"
+                                      for pair in attempt["ranges"])
+        task_failures = [pair for attempt in task_attempts if attempt["status"] == "failed"
+                         for pair in attempt["ranges"] if not any(
+                             start <= pair[0] and end >= pair[1] for start, end in task_reviewed)]
+        if not unread and fully_reviewed and task_reviewed and not task_failures:
+            # A missing answer is not new source material. Return the completed
+            # task; a caller may revisit the source with a different task.
+            self.cooperative_return_reason = "source_task_examined"
+            return None
+        reexamination = {span.key: span for span in document.spans
+                        if unread or fully_reviewed or not any(
+                            start <= span.start and end >= span.end for start, end in reviewed)}
+        reading_scopes = ("unexamined", "reexamine") if unread else ("reexamine",)
         tables = {t.key: t for t in document.tables if t.key not in document.attempted_tables}
         options = {key: {"episode": "source_table", **t.summary()} for key, t in tables.items()}
         if document.remaining("reexamine"):
-            if not document.report_attempted:
+            if unread and not document.report_attempted:
                 options["report"] = {"episode": "report", "meaning":
                     "Sequential reading with cross-window context; unexamined scope skips previously examined ranges. "
                     "A section name in question does not move the cursor; reaching later sections requires successive windows."}
@@ -281,6 +310,8 @@ class PageSource(ResearchSource):
         proposal = self.run.agent(self.inputs(view, operation="propose_page_child",
             source_summary={**document.summary(), "prior_reading": reading_coverage(
                 a for a in self.ledger.reading_attempts.values() if a["source"] == document.source)},
+            reexamination_spans={key: {"start": span.start, "end": span.end,
+                                      "opening": span.text[:240]} for key, span in reexamination.items()},
             available_children=options,
             instruction=("Choose among the actual available reading scopes using the delegated information need and prior coverage. "
                 "report reads sequentially from the next unprocessed span; it cannot jump to a named section in question. "
@@ -288,7 +319,9 @@ class PageSource(ResearchSource):
                 "source_table examines a detected table. For report or lexical_probe, choose reading_scope: "
                 "unexamined reads text not previously supplied to extraction in this source version, including "
                 "coverage from table rows and earlier visits; reexamine permits deliberate rereading for a new "
-                "question, failed extraction, or missing context. State that unresolved purpose in question. "
+                "question, failed extraction, or missing context. For reexamine use lexical_probe and select "
+                "explicit reexamine_spans totaling at most one reading window; state the specific changed "
+                "question or failed passage in question. It does not start another full-document reader. "
                 "Previously examined glossary rows are not unexamined equation discussion merely because "
                 "a new query ranks the same terms. Source versions with changed text have separate coverage. "
                 "Earlier reading under a different question does not rule out a useful reread. "
@@ -301,13 +334,20 @@ class PageSource(ResearchSource):
                 "required": ["option", "question"], "properties": {
                     "option": {"type": "string", "enum": list(options)},
                     "question": {"type": "string", "minLength": 1, "description": "Child information need"},
-                    "reading_scope": {"type": "string", "enum": ["unexamined", "reexamine"],
+                    "reading_scope": {"type": "string", "enum": list(reading_scopes),
                                       "description": "For report/lexical_probe: seek unexamined text or deliberately reread; tables retain row-query selection."},
+                    "reexamine_spans": {"type": "array", "minItems": 1, "uniqueItems": True,
+                        "items": {"type": "string", "enum": list(reexamination)},
+                        "description": "Exact source chunks for a focused reexamination, within one reading window."},
                     "query": {"type": "string", "minLength": 1, "description": "Literal query for lexical_probe"}},
                 "allOf": [{"if": {"properties": {"option": {"const": "lexical_probe"}}},
                            "then": {"required": ["query"]}},
                           {"if": {"properties": {"option": {"enum": ["report", "lexical_probe"]}}},
-                           "then": {"required": ["reading_scope"]}}]}))
+                           "then": {"required": ["reading_scope"]}},
+                          {"if": {"required": ["reading_scope"], "properties": {"reading_scope": {"const": "reexamine"}}},
+                           "then": {"required": ["reexamine_spans"], "properties": {"option": {"const": "lexical_probe"}}}},
+                          {"if": {"properties": {"option": {"const": "report"}}},
+                           "then": {"properties": {"reading_scope": {"const": "unexamined"}}}}]}))
         self.last_proposal = proposal
         option = selected_choice(proposal.get("option"), options, "option")
         question = required_text(proposal.get("question"), "question")
@@ -317,15 +357,26 @@ class PageSource(ResearchSource):
             grain = "source_table"
         elif option == "report":
             scope = selected_choice(proposal.get("reading_scope", "unexamined"),
-                                    ("unexamined", "reexamine"), "reading_scope")
+                                    ("unexamined",), "reading_scope")
             source = ReportSource(self.run, inherited, document=document, reading_scope=scope)
             grain = "report"
         else:
             scope = selected_choice(proposal.get("reading_scope", "unexamined"),
-                                    ("unexamined", "reexamine"), "reading_scope")
+                                    reading_scopes, "reading_scope")
+            selected_spans = None
+            if scope == "reexamine":
+                selected_spans = proposal.get("reexamine_spans")
+                known = reexamination
+                if (not isinstance(selected_spans, list) or not selected_spans
+                        or any(key not in known for key in selected_spans)
+                        or len(set(selected_spans)) != len(selected_spans)
+                        or sum(len(known[key].text) for key in selected_spans) > self.run.limits.text_window_chars):
+                    raise ValueError("Focused reexamination requires exact source chunks within one reading window")
             source = LexicalProbeSource(self.run, inherited, document=document,
-                query=required_text(proposal.get("query"), "query"), reading_scope=scope)
+                query=required_text(proposal.get("query"), "query"), reading_scope=scope,
+                selected_spans=selected_spans)
             grain = "lexical_probe"
+        source.page_task = page_task
         child = self.run.child(view, source, grain, question, proposal=proposal,
             contract=self.contract(f"Establish source-grounded evidence for {question}"))
         if option in tables:
@@ -424,6 +475,7 @@ class ReadingSource(ResearchSource):
             "source": self.document.source, "source_version": self.document.sha256,
             "document_characters": len(self.document.text), "episode_id": self.goal.goal_id,
             "first_model_call": first_call, "question": question,
+            "page_task": getattr(self, "page_task", None),
             "ranges": [[s.start, s.end] for s in spans],
             "status": "completed" if result.evaluated else "failed" if extraction_started else "not_started",
             "admitted_fields": sorted({f.field for f in result.facts} | {f for e in result.evidence for f in e.get("fields", ())}),
@@ -490,10 +542,11 @@ class ReportSource(ReadingSource):
 
 
 class LexicalProbeSource(ReadingSource):
-    def __init__(self, *args, query, reading_scope="unexamined", **kwargs):
+    def __init__(self, *args, query, reading_scope="unexamined", selected_spans=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.query, self.position = query, 0
-        self.parts = {span.key: self.document.reading_parts(span, reading_scope)
+        self.parts = {span.key: (self.document.reading_parts(span, reading_scope)
+                                if selected_spans is None or span.key in selected_spans else ())
                       for span in self.document.spans}
         # Empty ranking slots preserve physical neighbors; only original spans are extracted.
         ranking = tuple(Span(span.key, span.start, span.end,

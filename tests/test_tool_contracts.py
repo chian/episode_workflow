@@ -21,7 +21,7 @@ class ToolContractTests(unittest.TestCase):
         for tool, choices in expected.items():
             with self.subTest(tool=tool):
                 restrictions = [branch["then"]["properties"]["metrics"] for branch in schema["allOf"]
-                    if branch["if"]["properties"]["action"].get("const") == tool
+                    if branch["if"]["properties"].get("action", {}).get("const") == tool
                     and "metrics" in branch["then"].get("properties", {})]
                 self.assertEqual(len(restrictions), 1)
                 self.assertEqual(set(restrictions[0]["items"]["enum"]), choices)
@@ -30,12 +30,14 @@ class ToolContractTests(unittest.TestCase):
 
     def test_invalid_metric_feedback_names_the_mismatch_and_actual_choices(self):
         ledger = Ledger(ResearchResult(
-            facts=(Fact("fixture", "floor_area_m2", 40, "m2", "model_assumption", "Synthetic guess"),
-                   Fact("fixture", "room_height_m", 2.5, "m", "model_assumption", "Synthetic guess")),
-            scenarios=({"subject": "fixture", "description": "Synthetic test room"},)))
+            facts=(Fact("fixture", "floor_area_m2", 40, "m2", "scenario_constraint", "Synthetic fixture input"),
+                   Fact("fixture", "room_height_m", 2.5, "m", "scenario_constraint", "Synthetic fixture input")),
+            scenarios=({"subject": "fixture", "description": "Synthetic test room",
+                "fixed_parameters": {"floor_area_m2": {"value": 40, "unit": "m2"},
+                                     "room_height_m": {"value": 2.5, "unit": "m"}}},)))
         with self.assertRaises(ValueError) as raised:
             execute_tool({"action": "calculate_geometry_and_removal", "subject": "fixture",
-                "facts": list(ledger.options()), "basis": "Synthetic mismatched request",
+                "basis": "Synthetic mismatched request",
                 "metrics": ["critical_distance_m"]}, ledger, (),
                 review={"admit": True, "reason": "Fixture", "limitations": []})
         message = str(raised.exception)
@@ -58,10 +60,10 @@ class ToolContractTests(unittest.TestCase):
                             "basis": "Software fixture, not empirical evidence"}], "evidence": [], "findings": []}
                     return {"decisions": [{"option": 0, "admit": True, "reason": "Synthetic source agrees"}]}
                 result = extract_and_admit(agent, text=quote, source="https://example.test/fixture",
-                    focus=(field,), objective="Synthetic extraction test", context={}, question="Read the quantity")
+                    objective="Synthetic extraction test", context={}, question="Read the quantity")
                 unit_contract = requests[0]["response_contract"]["properties"]["facts"]["items"]["properties"]["unit"]
-                self.assertIn("population labels", unit_contract["description"])
-                self.assertIn("variable names", unit_contract["description"])
+                self.assertIn("accepted_source_units", unit_contract["description"])
+                self.assertIn(field, requests[0]["accepted_source_units"])
                 self.assertEqual(result.facts[0].value, value)
                 self.assertEqual(result.facts[0].quote, quote)
                 self.assertEqual(requests[1]["candidates"][0]["raw"]["unit"], unit)

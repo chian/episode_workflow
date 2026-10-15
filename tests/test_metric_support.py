@@ -36,8 +36,8 @@ class MetricSupportTests(unittest.TestCase):
         steady, transient = "indoor_reproductive_number", "transient_indoor_reproductive_number"
         self.weaken("initial_concentration_quanta_m3")
         calculation = self.calculate([steady, transient])
-        self.assertEqual(current_support(calculation, self.ledger.assumptions, metric=steady), 1)
-        self.assertEqual(current_support(calculation, self.ledger.assumptions, metric=transient), 0)
+        self.assertEqual(current_support(calculation, self.ledger.assumptions, ledger=self.ledger, metric=steady), 1)
+        self.assertEqual(current_support(calculation, self.ledger.assumptions, ledger=self.ledger, metric=transient), 0)
         scores = {f: score for f, _, score in self.ledger.result().credit((steady, transient), scientific=True).qualities}
         self.assertEqual(scores, {steady: 1, transient: PROVISIONAL_OUTPUT_CREDIT})
         scenarios, complete = scenario_results(self.ledger.result(), (steady, transient))
@@ -53,10 +53,10 @@ class MetricSupportTests(unittest.TestCase):
                 del self.ledger.assumptions[key]
         metric = "indoor_reproductive_number"
         calculation = self.calculate([metric])
-        self.assertTrue(calculation["support_issues"])
-        self.assertEqual(current_support(calculation, self.ledger.assumptions, metric=metric), 1)
+        self.assertNotIn("initial_concentration_quanta_m3", calculation["input_values"])
+        self.assertEqual(current_support(calculation, self.ledger.assumptions, ledger=self.ledger, metric=metric), 1)
         self.weaken("quanta_concentration_exhaled_m3")
-        self.assertEqual(current_support(calculation, self.ledger.assumptions, metric=metric), 0)
+        self.assertEqual(current_support(calculation, self.ledger.assumptions, ledger=self.ledger, metric=metric), 0)
 
     def test_derived_geometry_tracks_only_its_own_dependencies(self):
         values = {"floor_area_m2": 40, "room_height_m": 2.5, "removal_rate_s": .002, "clearance_fraction": .99}
@@ -66,9 +66,13 @@ class MetricSupportTests(unittest.TestCase):
         self.ledger.merge(result)
         followup = self.helper.execute(self.ledger, "calculate_geometry_and_removal",
             ("room_volume_m3", "removal_capacity_m3_s"), metrics=["removal_rate_s"])
-        self.assertEqual(current_support(followup.calculations[0], self.ledger.assumptions, metric="removal_rate_s"), 1)
-        fields = {self.ledger.assumptions[k]["field"] for k in followup.calculations[0]["assumption_versions"]}
-        self.assertNotIn("clearance_fraction", fields)
+        self.assertEqual(current_support(followup.calculations[0], self.ledger.assumptions, ledger=self.ledger, metric="removal_rate_s"), 1)
+        # The whole main table is bound automatically. Per-output dependencies,
+        # rather than a caller-selected subset, determine scientific support.
+        for support in (result.calculations[0]["derived_support"]["room_volume_m3"],
+                        followup.calculations[0]["metric_support"]["removal_rate_s"]):
+            fields = {self.ledger.assumptions[k]["field"] for k in support["assumption_versions"]}
+            self.assertNotIn("clearance_fraction", fields)
 
     def test_exclusion_requires_only_the_evidence_establishing_inapplicability(self):
         self.values["mask_penetration"] = .3
@@ -78,9 +82,9 @@ class MetricSupportTests(unittest.TestCase):
         result = self.helper.execute(self.ledger, "calculate_conditional_limits", self.values,
                                      metrics=[metric], conditions=self.conditions)
         self.assertEqual(result.estimates[0]["metrics"][metric]["status"], "inapplicable")
-        self.assertEqual(current_support(result.calculations[0], self.ledger.assumptions, metric=metric), 1)
+        self.assertEqual(current_support(result.calculations[0], self.ledger.assumptions, ledger=self.ledger, metric=metric), 1)
         self.weaken("mask_penetration")
-        self.assertEqual(current_support(result.calculations[0], self.ledger.assumptions, metric=metric), 0)
+        self.assertEqual(current_support(result.calculations[0], self.ledger.assumptions, ledger=self.ledger, metric=metric), 0)
 
     def test_merged_tool_results_preserve_separate_metric_support(self):
         self.weaken("initial_concentration_quanta_m3")
@@ -88,8 +92,8 @@ class MetricSupportTests(unittest.TestCase):
         self.calculate(["transient_indoor_reproductive_number"])
         self.assertEqual(len(self.ledger.estimates), 1)
         estimate = next(iter(self.ledger.estimates.values()))
-        self.assertEqual(current_support(estimate, self.ledger.assumptions, metric="indoor_reproductive_number"), 1)
-        self.assertEqual(current_support(estimate, self.ledger.assumptions, metric="transient_indoor_reproductive_number"), 0)
+        self.assertEqual(current_support(estimate, self.ledger.assumptions, ledger=self.ledger, metric="indoor_reproductive_number"), 1)
+        self.assertEqual(current_support(estimate, self.ledger.assumptions, ledger=self.ledger, metric="transient_indoor_reproductive_number"), 0)
 
     def test_trace_uses_executed_operand_not_an_unused_equivalent_input(self):
         values = {"quanta_emission_rate_s": .02, "quanta_concentration_exhaled_m3": 20,
@@ -121,8 +125,8 @@ class MetricSupportTests(unittest.TestCase):
                            if f.field == "attack_probability" and f.kind == "source_observation")
         comparison = self.helper.execute(self.ledger, "compare_predictions_with_observations", (),
             prediction="calculation:1", observation=observation, metric=metric).calculations[0]
-        self.assertEqual(current_support(prediction, self.ledger.assumptions), 0)
-        self.assertEqual(current_support(comparison, self.ledger.assumptions), 1)
+        self.assertEqual(current_support(prediction, self.ledger.assumptions, ledger=self.ledger), 0)
+        self.assertEqual(current_support(comparison, self.ledger.assumptions, ledger=self.ledger), 1)
         self.assertFalse(comparison["output"]["independent_validation"])
         from episodic_workflow.case_reports.research.records import ResearchResult
         self.ledger.merge(ResearchResult(calculations=(comparison,)))

@@ -4,12 +4,13 @@ Ordinal review grades are operational judgments, not calibrated probabilities.
 The proposer cannot set its own credit or turn a conditional claim into evidence.
 """
 
-from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter, output_meets_contract
+from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter
 from ...task_executors.scenario_metrics.catalog import METRICS
-from .records import Credit, Fact, ResearchResult, identity, assessment_summary, assumption_claim, current_support, current_computation
+from .records import Credit, Fact, ResearchResult, identity, assessment_summary, assumption_claim, current_support
 from .scenarios import check_case_inputs
-from .progress import parameter_support
+from .progress import parameter_support, found_parameter_progress
 from .verification import CALIBRATION_PROGRESS, calibration_progress, target_calibration_progress
+from .model_defaults import retained_defaults
 
 
 RUBRIC = {
@@ -90,6 +91,8 @@ def assumption_candidate(action, ledger):
     if field not in UNITS and field not in CONDITIONS:
         raise ValueError("Unknown assumption field or model condition")
     definition = ledger.scenarios[subject]
+    if field in retained_defaults(definition):
+        raise ValueError(f"{field} is a retained model default; the constants judge must promote it before a scenario-specific value is proposed")
     check_case_inputs(definition, {field: action.get("value")} if field in UNITS else {},
                       {field: action.get("statement")} if field in CONDITIONS else {})
     if field in definition.get("fixed_parameters", {}) or field in definition.get("fixed_conditions", {}):
@@ -120,10 +123,10 @@ def assumption_candidate(action, ledger):
 
 
 def _candidate_derivation(action, claim, ledger):
-    from .tools import input_options
+    from .records import numeric_references
 
     evidence = ledger.evidence_options()
-    numeric = input_options(ledger)
+    numeric = numeric_references(ledger)
     evidence_ids = {identity(row) for row in evidence.values()}
     numeric_keys = {fact.key: fact for fact in numeric.values()}
     if "derivation" in action:
@@ -225,6 +228,7 @@ def candidate_response_schema(*, scenarios=None, evidence=None, numeric_inputs=N
                 choices = [f for f in fields
                     if f not in definition.get("fixed_parameters", {})
                     and f not in definition.get("fixed_conditions", {})
+                    and f not in retained_defaults(definition)
                     and f not in definition.get("calculation_variables", ())]
                 branch["allOf"].append({"if": {"properties": {"subject": {"const": subject}}},
                     "then": {"properties": {"field": {"enum": choices} if choices else False}}})
@@ -246,8 +250,73 @@ def unassessed_assumption(candidate, ledger):
     return assessment
 
 
-def assess_assumption(agent, action, ledger, context):
+def candidate_review_scope(candidate, ledger):
+    """The physical cases and sharing decision to which a claim applies."""
+    from .scenario_sharing import group_for
+
+    group = group_for(ledger, candidate["subject"], candidate["field"]) or {}
+    subjects = group.get("subjects", (candidate["subject"],))
+    return {"scenarios": {name: ledger.scenarios.get(name) for name in subjects}, "group": group}
+
+
+def register_candidate(candidate, ledger):
+    """Retain a validated hypothesis before the common value and review processing.
+
+    A registered statement and its input provenance define the claim. Rewriting
+    explanatory prose cannot replace its physical premises without changing that
+    statement or the identified provenance.
+    """
+    claim = assumption_candidate(candidate, ledger)
+    key = identity([claim["subject"], claim["field"], claim["value"],
+                    claim["statement"] if claim["field"] in CONDITIONS else None])
+    current = ledger.assumptions.get(key)
+    scope_version = identity(candidate_review_scope(claim, ledger))
+    provenance_fields = ("source_evidence_ids", "input_fact_keys", "input_assumption_claims")
+
+    def provenance(row):
+        derivation = row.get("derivation", {})
+        return {name: sorted(derivation.get(name, ())) if name != "input_assumption_claims"
+                else derivation.get(name, {}) for name in provenance_fields}
+
+    same_claim = (current is not None and assumption_claim(current) == assumption_claim(claim)
+        and provenance(current) == provenance(claim)
+        and current.get("candidate_scope_version", scope_version) == scope_version)
+    if same_claim:
+        changed_prose = (current["basis"] != claim["basis"] or
+            current.get("derivation", {}).get("added_assumptions", ()) !=
+            claim.get("derivation", {}).get("added_assumptions", ()))
+        diagnostics = ({"stage": "candidate_registration", "category": "registered_claim_retained",
+            "subject": claim["subject"], "field": claim["field"], "value": claim["value"],
+            "why": "The existing claim, provenance and scope are unchanged. Its registered basis and added assumptions were retained; the proposed rationale rewrite was not applied. A material premise revision must change the claim statement or identified input/source provenance.",
+            "proposed_basis": claim["basis"],
+            "proposed_added_assumptions": claim.get("derivation", {}).get("added_assumptions", [])},) if changed_prose else ()
+        return ResearchResult(assumptions=(current,), diagnostics=diagnostics)
+    registered = unassessed_assumption(claim, ledger)
+    registered["candidate_scope_version"] = scope_version
+    registered.pop("version", None)
+    registered["version"] = identity(registered)
+    return ResearchResult(assumptions=(registered,))
+
+
+def candidate_review_identity(candidate, ledger):
+    """One review cache identity for every origin; relevance is separate."""
+    return identity({"claim": assumption_claim(candidate), "basis": candidate["basis"],
+        "derivation": candidate.get("derivation", {}),
+        "evidence": sorted(identity(row) for row in ledger.evidence_options().values()),
+        **candidate_review_scope(candidate, ledger)})
+
+
+def assess_assumption(agent, action, ledger, context, *, source_candidate_key=None):
     claim = assumption_candidate(action, ledger)
+    automatic = None
+    if source_candidate_key is not None:
+        automatic = ledger.assumptions[source_candidate_key]
+        if (automatic.get("entry_type") != "source_candidate"
+                or automatic.get("source_candidate_unavailable")
+                or any(claim[name] != automatic[name] for name in claim)):
+            raise ValueError("Automatic support review must preserve the selected available claim")
+        claim.update(entry_type="source_candidate", derivation=automatic["derivation"],
+                     source_applicability=automatic["source_applicability"])
     subject, field, value = claim["subject"], claim["field"], claim["value"]
     options = ledger.evidence_options()
     keys = action.get("evidence", [])
@@ -255,9 +324,9 @@ def assess_assumption(agent, action, ledger, context):
         raise ValueError("Assumption evidence must reference the admitted evidence catalog")
     evidence = {k: options[k] for k in dict.fromkeys(keys)}
     inference = {}
-    if claim.get("entry_type") == "best_guess":
-        from .tools import input_options
-        numeric = {fact.key: fact for fact in input_options(ledger).values()}
+    if claim.get("entry_type") in {"best_guess", "source_candidate"}:
+        from .records import numeric_provenance
+        numeric = numeric_provenance(ledger)
         derivation = claim["derivation"]
         inference = {
             "proposed_source_refs": [key for key, row in evidence.items()
@@ -280,6 +349,10 @@ def assess_assumption(agent, action, ledger, context):
             "observation is not a representative measurement, but may anchor a bounded heuristic. "
             "For a best_guess entry, check the recasting, arithmetic, dimensional meaning and added "
             "assumptions stated in basis and derivation against derivation_inputs and the source evidence. "
+            "A source_candidate is an automatically recorded conditional transfer of a native source "
+            "value to a target parameter group, preserving quantity and unit. Assess that transfer's "
+            "scientific support and limitations; its automatic origin is not a reason to reject it. "
+            "source_applicability is a separate relevance judgment, not established physical support. "
             "proposed_source_refs records the proposer's claimed support, not your admission decision; "
             "select supporting_evidence independently. The inferred value has its own record and need "
             "not be printed in its source. Never turn a source's native quantity into a different "
@@ -304,10 +377,12 @@ def assess_assumption(agent, action, ledger, context):
             "admitted evidence references. Grade established understanding, not the amount of prose: "
             "naming a limitation is not the same as bounding it with applicable evidence. "
             "The weakest grade limits current conclusion support, not permission to calculate a hypothesis. "
-            "Learning credit separately records evidenced parameter values and distinct evidence that "
-            "strengthens, refines or overturns previously supported claims. It is not a rubric grade "
-            "or a measure of how completely a question was answered. Repeating an assessment or "
-            "proposing another candidate does not itself earn progress. "
+            "Recording a numerical target hypothesis fills one independent parameter need and earns "
+            "its discovery point regardless of this review's grades. Evidence learning separately "
+            "records distinct evidence that strengthens, refines or overturns supported claims. "
+            "Neither is a rubric grade or a measure of how completely a question was answered. "
+            "Repeating an assessment or adding alternatives for an already filled need does not "
+            "earn another discovery point. "
             "Classify whether this candidate instantiates an explicit requester condition. If so, "
             "return request_constraint with its admitted request evidence and explain applicability "
             "to this target even when the request evidence names a broader scenario class. Otherwise "
@@ -372,7 +447,7 @@ def assess_assumption(agent, action, ledger, context):
     declared = declared or constraint is not None
     if verdict in {"supported", "provisional"} and not declared and not review["supporting_evidence"]:
         raise ValueError("A supported or provisional scientific claim requires supporting evidence")
-    key = identity([subject, field, value, claim["statement"] if field in CONDITIONS else None])
+    key = source_candidate_key or identity([subject, field, value, claim["statement"] if field in CONDITIONS else None])
     previous = ledger.assumptions.get(key, {})
     learning = list(previous.get("learning_evidence", ()))
     invalid = list(previous.get("invalidated_evidence", ()))
@@ -386,13 +461,14 @@ def assess_assumption(agent, action, ledger, context):
             learning.extend({"relation": "contradicts", "evidence": evidence[ref]}
                             for ref in review["contradicting_evidence"])
     learning = list({identity(row): row for row in learning}.values())
-    assessment = {**claim, "key": key, "review": review, "evidence": evidence,
+    assessment = {**previous, **claim, "key": key, "review": review, "evidence": evidence,
                   "reasonableness": quality,
                   "role": "request_constraint" if declared else "inferred_assumption",
                   "learning_evidence": learning, "invalidated_evidence": invalid}
+    assessment.pop("version", None)
     assessment["version"] = identity(assessment)
     facts = ()
-    if field in UNITS and quality > 0:
+    if field in UNITS and quality > 0 and automatic is None:
         facts = (Fact(subject, field, value, UNITS[field], "model_assumption", claim["basis"],
                       context=claim["statement"], parents=(key,)),)
     return ResearchResult(facts=facts, assumptions=(assessment,),
@@ -400,6 +476,83 @@ def assess_assumption(agent, action, ledger, context):
                           diagnostics=({"stage": "assumption_assessment", "category": verdict,
                                         "subject": subject, "field": field, "why": review["explanation"],
                                         "limitations": review["limitations"], "missing_evidence": review["missing_evidence"]},))
+
+
+def assess_registered_candidates(agent, ledger, keys, context, on_failure, *,
+                                 stage="candidate_reasonableness_assessment"):
+    """Reuse or update one review for registered claims of every origin."""
+    from dataclasses import replace
+    from ...task_executors._http import ProviderError
+    from .records import Ledger
+
+    working = Ledger(ledger.result())
+    updates, facts, findings, diagnostics, issues = [], [], [], [], []
+    for key in dict.fromkeys(keys):
+        candidate = working.assumptions.get(key)
+        if (candidate is None or candidate.get("source_candidate_unavailable")
+                or candidate.get("role") in {"scenario_constraint", "request_constraint", "model_default"}):
+            continue
+        evidence = working.evidence_options()
+        basis_version = candidate_review_identity(candidate, working)
+        action = {name: candidate[name] for name in ("subject", "field", "value", "unit", "statement", "basis")}
+        automatic = candidate.get("entry_type") == "source_candidate"
+        if not automatic and candidate.get("entry_type") == "best_guess":
+            action.update(entry_type="best_guess", derivation=candidate["derivation"])
+        review = candidate.get("review", {})
+        old_manual_basis = identity([action, list(evidence.values()), working.scenarios.get(candidate["subject"])])
+        old_automatic_basis = identity({"claim": assumption_claim(candidate),
+            "derivation": candidate.get("derivation"),
+            "evidence": sorted(identity(row) for row in evidence.values()),
+            **candidate_review_scope(candidate, working)})
+        reusable = (review.get("completed", True) and review.get("verdict") != "unassessed" and (
+            review.get("assessment_basis_version") == basis_version
+            or (automatic and review.get("assessment_basis_version") == old_automatic_basis)
+            or (not automatic and candidate.get("assessment_basis_version") == old_manual_basis)))
+        if reusable:
+            if (review.get("completed") is not True or review.get("assessment_basis_version") != basis_version
+                    or "assessment_basis_version" in candidate):
+                retained = {**candidate, "review": {**review, "completed": True,
+                    "assessment_basis_version": basis_version}}
+                retained.pop("assessment_basis_version", None)
+                retained.pop("version", None)
+                retained["version"] = identity(retained)
+                working.merge(ResearchResult(assumptions=(retained,)))
+                updates.append(retained)
+            continue
+        try:
+            reviewed = assess_assumption(agent, {**action, "evidence": list(evidence)}, working,
+                context, source_candidate_key=key if automatic else None)
+            assessment = reviewed.assumptions[0]
+            assessment["review"] = {**assessment["review"], "completed": True,
+                                    "assessment_basis_version": basis_version}
+            assessment.pop("assessment_basis_version", None)
+            assessment.pop("version", None)
+            assessment["version"] = identity(assessment)
+            working.merge(reviewed)
+            updates.extend(reviewed.assumptions)
+            facts.extend(reviewed.facts)
+        except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+            reviewed = on_failure(exc, stage)
+            reviewed = replace(reviewed, diagnostics=tuple({**row, "subject": candidate["subject"],
+                "field": candidate["field"], "assumption_key": key,
+                "hypothesis_available": True} for row in reviewed.diagnostics))
+        findings.extend(reviewed.findings)
+        diagnostics.extend(reviewed.diagnostics)
+        issues.extend(reviewed.issues)
+    return ResearchResult(facts=tuple(facts), assumptions=tuple(updates), findings=tuple(findings),
+                          diagnostics=tuple(diagnostics), issues=tuple(issues))
+
+
+def assess_selected_source_candidates(agent, ledger, facts, conditions, subject, context, on_failure):
+    """Use the common review cache for the actual selected premises of any origin."""
+    from .tools import support_for
+
+    selected, _, _ = support_for(ledger, facts, conditions, subject)
+    keys = [key for key, row in selected.items()
+            if row.get("entry_type") in {"best_guess", "source_candidate"}
+            or row.get("review", {}).get("assessment_basis_version")]
+    return assess_registered_candidates(agent, ledger, keys, context, on_failure,
+                                         stage="selected_input_reasonableness_assessment")
 
 
 def frame_scenario(agent, action, ledger, context):
@@ -454,18 +607,23 @@ def frame_scenario(agent, action, ledger, context):
 
 
 def scientific_credit(result, focus, *, subjects=None, outputs=None):
-    """Project reviewed learning, not field presence or children's numeric scores."""
+    """Project independent target discoveries and separately qualified computations."""
     rows = []
     subjects = (set(subjects) if subjects is not None else
                 {s["subject"] for s in result.scenarios if s.get("role", "target") == "target"})
     current = {a["key"]: a for a in result.assumptions}
     from .records import Ledger
     ledger = Ledger(result)
-    from .scenario_sharing import independent_groups
+    from .scenario_sharing import independent_groups, needed_fields
+    from .calculation_steps import calculation_step_status
+    from ...task_executors.scenario_metrics.dependencies import CALCULATED_PARAMETER_FIELDS
     scoped_groups = independent_groups(ledger) if any(row.get("kind") == "group"
         for row in result.scenario_parameter_relations) else ()
-    contracts = {s["subject"]: s.get("output_contracts", {}) for s in result.scenarios}
+    found = found_parameter_progress(result, ledger=ledger)
     outputs = set(METRICS) if outputs is None else set(outputs)
+    calculation_fields = set(focus).intersection(outputs | CALCULATED_PARAMETER_FIELDS)
+    steps = calculation_step_status(result, sorted(outputs), subjects=subjects) if calculation_fields else {"steps": []}
+    step_scores = {(row["subject"], row["field"]): row["points"] for row in steps["steps"]}
     calibration = calibration_progress(result) if CALIBRATION_PROGRESS in focus else None
     linked_targets = target_calibration_progress(result, sorted(outputs), calibration=calibration) if calibration else {}
     for field in focus:
@@ -480,6 +638,16 @@ def scientific_credit(result, focus, *, subjects=None, outputs=None):
                                  for name in outputs) / len(outputs)
                              for alternative in alternatives if alternative["coherent"] and outputs), default=0)
                 rows.append((field, "target:" + subject, score))
+            continue
+        if field in calculation_fields:
+            rows.extend((field, subject, step_scores.get((subject, field), 0.0)) for subject in sorted(subjects))
+            continue
+        if field in UNITS:
+            groups = [row for row in found if row["parameter"] == field
+                      and set(row["subjects"]).intersection(subjects)]
+            rows.extend((field, "group:" + row["group_id"], row["points"]) for row in groups)
+            if not groups:
+                rows.extend((field, subject, 0.0) for subject in sorted(subjects))
             continue
         if field not in outputs and field != "evidence_consistency":
             groups = [group for group in scoped_groups if group["parameter"] == field
@@ -497,13 +665,12 @@ def scientific_credit(result, focus, *, subjects=None, outputs=None):
                 score = max((current_support(c, current, ledger=ledger) for c in result.calculations
                     if c["subject"] == subject and c["tool"] == "compare_predictions_with_observations"
                     and c["output"]["category"] != "calibration_consistency"), default=0)
-            elif field in outputs:
-                score = max((max(current_support(e, current, metric=field, ledger=ledger),
-                                 PROVISIONAL_OUTPUT_CREDIT)
-                             for e in result.estimates
-                    if e["subject"] == subject and current_computation(e, current, field, ledger=ledger)
-                    and output_meets_contract(e["metrics"].get(field, {}), contracts.get(subject, {}).get(field))), default=0)
             else:
+                scenario = ledger.scenarios.get(subject, {})
+                if (field in retained_defaults(scenario) or field in CALCULATED_PARAMETER_FIELDS
+                        or (scoped_groups and field not in needed_fields(scenario))):
+                    rows.append((field, subject, 0.0))
+                    continue
                 learning = parameter_support(result, (field,), hypotheses_only=True, subjects=(subject,))
                 score = learning[0]["points"] if learning else 0.0
             rows.append((field, subject, score))

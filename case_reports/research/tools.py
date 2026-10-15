@@ -4,8 +4,9 @@ from ...task_executors.scenario_metrics.catalog import METRICS
 from ...task_executors.scenario_metrics.dependencies import input_requirements
 from ...task_executors.scenario_metrics.evaluate import UNITS, evaluate_parameters, output_dependencies
 from ...task_executors.scenario_metrics.exposure import EXPOSURE_OUTPUTS, MODEL_VERSION
-from .modeling import DERIVATIONS, derivation_inputs, derive_parameter, select_facts
-from .records import Fact, ResearchResult, identity, current_support, current_computation, assumption_claim, assumption_matches
+from .modeling import DERIVATIONS, derivation_inputs, derive_parameter, source_calculation_inputs
+from .records import Fact, ResearchResult, identity, current_support, current_scenario_links, assumption_claim, assumption_matches, sharing_scope_version
+from .model_defaults import retained_defaults
 from .scenarios import check_case_inputs
 from .scenario_sharing import shared_assumptions
 
@@ -18,9 +19,9 @@ LIMITS = frozenset({"cumulative_exposure_bound_person_s", "exposure_time_bound_s
     "critical_distance_m", "risk_threshold_distance_m", "jet_corrected_time_bound_s",
     *(name for name, (operation, _) in EXPOSURE_OUTPUTS.items() if operation != "evaluate_R_in")})
 TOOLS = {
-    "calculate_geometry_and_removal": "Derive geometry and removal quantities from selected inputs or recorded hypotheses.",
+    "calculate_geometry_and_removal": "Derive geometry and removal quantities from the current main-table values and supplied scenario inputs.",
     "calibrate_infectiousness": "Apply an explicitly selected calibration, activity rescaling, or transfer operator.",
-    "calculate_transmission_metrics": "Evaluate the shared risk model at fixed time AND fixed distance. Select scenario_reproductive_number and/or transient_scenario_reproductive_number. The reference inputs are bound from the selected case; the agent selects scientific assumptions. Available parameter derivations execute inside this tool.",
+    "calculate_transmission_metrics": "Evaluate the shared risk model at fixed time AND fixed distance. Select scenario_reproductive_number and/or transient_scenario_reproductive_number. The reference inputs are bound from the selected case; numeric inputs are bound automatically from the current main table. Available parameter derivations execute inside this tool.",
     "calculate_conditional_limits": "Invert the shared risk model: allowable_room_time_s (or transient counterpart) fixes distance and solves time; safe_distance_m (or transient counterpart) fixes time and solves distance. Reference inputs are bound from the case. Select either operation or both; no prescribed sequence or separate geometry call is required.",
     "compare_predictions_with_observations": "Compare one versioned prediction with an admitted observation; preserve calibration dependence.",
 }
@@ -31,54 +32,83 @@ TOOL_METRICS = {
 }
 
 
-def input_options(ledger):
-    """Expose numerical hypotheses without promoting them into the evidence ledger."""
-    options = ledger.options()
-    for i, assumption in enumerate(ledger.assumptions.values(), 1):
-        if assumption["value"] is not None:
-            options[f"assumption:{i}"] = Fact(assumption["subject"], assumption["field"], assumption["value"],
-                assumption["unit"], "model_assumption", assumption["basis"],
-                context=assumption["statement"], parents=(assumption["key"],))
-    for subject in ledger.scenarios:
-        for assumption, relation in shared_assumptions(ledger, subject):
-            option = f"shared:{assumption['key']}:{subject}"
-            options[option] = Fact(subject, assumption["field"], assumption["value"],
-                assumption["unit"], "model_assumption", assumption["basis"],
-                context=f"Shared from {assumption['subject']}: {assumption['statement']}",
-                parents=(assumption["key"], identity(relation)))
-    return options
+def main_calculation_inputs(ledger, subject):
+    """Bind actual main-table values, supplied inputs, and current computed facts.
+
+    This is a deterministic binding, not a catalog from which a caller chooses.
+    """
+    from .calculation_steps import current_calculated_inputs, selected_target_snapshot
+
+    scenario = ledger.scenarios.get(subject)
+    if scenario is None or scenario.get("role", "target") != "target":
+        raise ValueError("Main-table calculation binding requires a registered target scenario")
+    bound = {}
+    fixed = scenario.get("fixed_parameters", {})
+    defaults = retained_defaults(scenario)
+    for field, row in {**defaults, **fixed}.items():
+        kind = "scenario_constraint" if field in fixed else "model_default"
+        matches = [fact for fact in ledger.facts.values() if fact.subject == subject
+                   and fact.field == field and fact.kind == kind
+                   and (fact.value, fact.unit) == (row["value"], row["unit"])]
+        if not matches:
+            # Supplied values are explicit scenario metadata, not inferred claims.
+            matches = [Fact(subject, field, row["value"], row["unit"], kind,
+                            row.get("basis", "Explicit scenario input"))]
+        bound[field] = matches[0]
+    shared = {assumption["key"]: relation for assumption, relation in shared_assumptions(ledger, subject)}
+    for (target, field), row in selected_target_snapshot(ledger).items():
+        if target != subject or not row.get("found") or field in bound:
+            continue
+        assumption = ledger.assumptions[row["selected_assumption_key"]]
+        parents = (assumption["key"],)
+        context = assumption["statement"]
+        if assumption["subject"] != subject:
+            if assumption["key"] not in shared:
+                raise ValueError(f"Main-table input {field} has no current sharing relation for {subject}")
+            parents += (identity(shared[assumption["key"]]),)
+            context = f"Shared from {assumption['subject']}: {context}"
+        bound[field] = Fact(subject, field, row["value"], row["unit"], "model_assumption",
+                            assumption["basis"], context=context, parents=parents)
+    for fact in current_calculated_inputs(ledger, subject):
+        if fact.field not in bound:
+            bound[fact.field] = fact
+    return tuple(bound.values())
 
 
-def bind_reference_inputs(action, ledger, requested_metrics):
-    """Carry caller-owned inputs and conditions into review and execution."""
-    if action.get("action") not in TOOLS or action.get("action") == "compare_predictions_with_observations":
-        return action
-    definition = ledger.scenarios.get(action.get("subject"), {})
+def resolve_calculation_inputs(action, ledger, requested_metrics=()):
+    """Resolve actual inputs before model review and again before execution."""
+    subject = action.get("subject")
+    definition = ledger.scenarios.get(subject)
+    if definition is None:
+        raise ValueError("Calculations require a reviewed scenario")
     conditions = action.get("conditions", {})
     if not isinstance(conditions, dict):
-        return action
+        raise ValueError("Conditions must be named statements")
     check_case_inputs(definition, {}, conditions)
     action = {**action, "conditions": {**definition.get("fixed_conditions", {}), **conditions}}
-    allowed = TOOL_METRICS.get(action.get("action"))
-    if allowed is None:
-        return action
-    metrics = action.get("metrics", [name for name in requested_metrics if name in allowed])
-    if not isinstance(metrics, list) or any(not isinstance(name, str) or name not in allowed for name in metrics):
-        return action
-    fixed = definition.get("fixed_parameters", {})
-    options = input_options(ledger)
-    selected = select_facts(action, options)
-    present = {fact.field for fact in selected}
-    required = set(input_requirements(metrics, present, action["conditions"])["unresolved"])
-    references = list(action["facts"])
-    for field in sorted(required.intersection(fixed) - present):
-        matches = [key for key, fact in options.items() if fact.subject == action["subject"]
-                   and fact.field == field and fact.kind == "scenario_constraint"
-                   and fact.value == fixed[field]["value"]]
-        if not matches:
-            raise ValueError(f"The supplied reference input {field} has no scenario-constraint record")
-        references.append(matches[0])
-    return {**action, "facts": references}
+    target = definition.get("role", "target") == "target"
+    if target:
+        action.pop("facts", None)
+        action.pop("source_inputs", None)
+        if action.get("operator") == "transfer_parameter":
+            raise ValueError("Target values are bound from the main table; source transfer cannot override them")
+        facts = main_calculation_inputs(ledger, subject)
+    else:
+        facts = source_calculation_inputs(action, ledger)
+        by_field = {fact.field: fact for fact in facts}
+        for field, row in {**retained_defaults(definition), **definition.get("fixed_parameters", {})}.items():
+            if field not in by_field:
+                kind = "scenario_constraint" if field in definition.get("fixed_parameters", {}) else "model_default"
+                by_field[field] = next((fact for fact in ledger.facts.values()
+                    if fact.subject == subject and fact.field == field and fact.kind == kind
+                    and (fact.value, fact.unit) == (row["value"], row["unit"])),
+                    Fact(subject, field, row["value"], row["unit"], kind,
+                         row.get("basis", "Explicit scenario input")))
+        facts = tuple(by_field.values())
+    if action.get("action") == "calibrate_infectiousness":
+        required = derivation_inputs(action.get("operator"), {fact.field: fact.value for fact in facts})
+        facts = tuple(fact for fact in facts if fact.field in required)
+    return action, facts
 
 
 def support_for(ledger, facts, conditions, subject):
@@ -91,12 +121,29 @@ def support_for(ledger, facts, conditions, subject):
     def require(fact):
         if fact.key in visiting:
             raise ValueError("Cyclic parameter provenance")
+        if fact.kind == "model_assumption" and fact.parents:
+            # A selected hypothesis already identifies its premise. Another
+            # same-valued claim must not silently replace that lineage.
+            key = fact.parents[0]
+            parent = ledger.assumptions.get(key)
+            direct = (parent is not None and len(fact.parents) == 1
+                      and parent["subject"] == fact.subject
+                      and parent["statement"] == fact.context)
+            shared = (len(fact.parents) == 2 and any(
+                a["key"] == key and identity(relation) == fact.parents[1]
+                and fact.context == f"Shared from {a['subject']}: {a['statement']}"
+                for a, relation in shared_assumptions(ledger, fact.subject)))
+            if (parent is not None and not parent.get("source_candidate_unavailable")
+                    and (direct or shared) and parent["field"] == fact.field
+                    and parent["value"] == fact.value and parent["unit"] == fact.unit):
+                selected[key] = parent
+            else:
+                issues.append(f"Selected hypothesis for {fact.field} is unavailable or its claim changed")
+                invalidated.append(key)
+            return
         matches = [a for a in ledger.assumptions.values() if a["subject"] == fact.subject
-                   and a["field"] == fact.field and a["value"] == fact.value]
-        if not matches and fact.kind == "model_assumption" and len(fact.parents) == 2:
-            matches = [a for a, relation in shared_assumptions(ledger, fact.subject)
-                       if a["key"] == fact.parents[0] and identity(relation) == fact.parents[1]
-                       and a["field"] == fact.field and a["value"] == fact.value]
+                   and a["field"] == fact.field and a["value"] == fact.value
+                   and not a.get("source_candidate_unavailable")]
         if matches:
             a = max(matches, key=lambda a: a["reasonableness"])
             selected[a["key"]] = a
@@ -118,6 +165,9 @@ def support_for(ledger, facts, conditions, subject):
         dependency = calculation.get("derived_support", {}).get(fact.field, calculation)
         issues.extend(dependency.get("support_issues", ()))
         invalidated.extend(dependency.get("invalidated_dependencies", ()))
+        if not current_scenario_links(dependency, ledger):
+            issues.append(f"Derived {fact.field} depends on changed scenario inputs, constants or sharing")
+            invalidated.append(calculation["version"])
         if (not calculation.get("model_review", {}).get("admit", True)
                 or not calculation.get("model_review", {}).get("completed", True)):
             issues.append(f"Derived {fact.field}: {calculation['model_review']['reason']}")
@@ -133,7 +183,7 @@ def support_for(ledger, facts, conditions, subject):
         # The version/claim checks above still govern whether these inputs apply.
         inputs = {identity(row): Fact(**{**row, "parents": tuple(row.get("parents", ()))})
                   for row in calculation.get("input_records", ())}
-        inputs.update((f.key, f) for f in input_options(ledger).values())
+        inputs.update(ledger.facts)
         for key in dependency["input_fact_keys"]:
             if key in inputs:
                 require(inputs[key])
@@ -164,8 +214,15 @@ def scenario_parameter_links(facts, ledger=None):
             return
         seen.add(fact.key)
         if fact.kind == "model_assumption" and len(fact.parents) == 2:
-            links.append({"assumption_key": fact.parents[0], "relation_version": fact.parents[1],
-                          "target_subject": fact.subject})
+            link = {"assumption_key": fact.parents[0], "relation_version": fact.parents[1],
+                    "target_subject": fact.subject}
+            if ledger is not None:
+                for assumption, relation in shared_assumptions(ledger, fact.subject):
+                    if assumption["key"] == fact.parents[0] and identity(relation) == fact.parents[1]:
+                        link.update(scope_version=sharing_scope_version(relation),
+                                    assumption_claim=assumption_claim(assumption))
+                        break
+            links.append(link)
         if ledger is not None and fact.kind == "derived":
             for calculation in ledger.calculations.values():
                 if fact.key not in calculation.get("output_fact_keys", ()):
@@ -174,7 +231,7 @@ def scenario_parameter_links(facts, ledger=None):
                     links.append(row)
                 records = {identity(row): Fact(**{**row, "parents": tuple(row.get("parents", ()))})
                            for row in calculation.get("input_records", ())}
-                records.update((option.key, option) for option in input_options(ledger).values())
+                records.update(ledger.facts)
                 for key in calculation.get("input_fact_keys", ()):
                     if key in records:
                         visit(records[key])
@@ -196,7 +253,31 @@ def calculation_record(tool, subject, facts, support, output, *, conditions, bas
     return record
 
 
-def output_support(estimate, field, facts, ledger, review, *, derived=False):
+def scenario_input_bindings(facts, ledger):
+    """Record the supplied values actually used, separately from evidence review."""
+    bindings = []
+    for fact in facts:
+        scenario = ledger.scenarios.get(fact.subject, {})
+        fixed = scenario.get("fixed_parameters", {})
+        defaults = retained_defaults(scenario)
+        kind = ("scenario_constraint" if fact.field in fixed else
+                "model_default" if fact.field in defaults else None)
+        if kind is not None:
+            bindings.append({"subject": fact.subject, "field": fact.field,
+                             "value": fact.value, "unit": fact.unit, "kind": kind})
+    return bindings
+
+
+def scenario_condition_bindings(subject, conditions, ledger):
+    fixed = ledger.scenarios.get(subject, {}).get("fixed_conditions", {})
+    return [{"subject": subject, "field": field, "statement": statement}
+            for field, statement in conditions.items() if field in fixed]
+
+
+def output_support(estimate, field, facts, ledger, review, *, derived=False, selection=None):
+    from .calculation_steps import selected_target_bindings, selected_target_snapshot
+    if selection is None:
+        selection = selected_target_snapshot(ledger)
     inputs, conditions = output_dependencies(estimate, field, derived=derived)
     selected = [fact for fact in facts if fact.field in inputs]
     support, issues, invalidated = support_for(ledger, selected,
@@ -206,7 +287,11 @@ def output_support(estimate, field, facts, ledger, review, *, derived=False):
     if not derived and estimate["metrics"][field].get("applicability_warning"):
         issues.append(estimate["metrics"][field]["applicability_warning"])
     return {"input_fields": inputs, "condition_fields": conditions,
+            "selected_target_bindings": selected_target_bindings(selected, selection),
             "input_fact_keys": [f.key for f in selected],
+            "scenario_input_bindings": scenario_input_bindings(selected, ledger),
+            "scenario_condition_bindings": scenario_condition_bindings(estimate["subject"],
+                {field: estimate["conditions"][field] for field in conditions if field in estimate["conditions"]}, ledger),
             "scenario_parameter_links": scenario_parameter_links(selected, ledger),
             "assumption_versions": {k: a["version"] for k, a in support.items()},
             "assumption_claims": {k: assumption_claim(a) for k, a in support.items()},
@@ -219,8 +304,7 @@ def execute_tool(action, ledger, requested_metrics, *, review):
         raise ValueError("Undeclared deterministic tool")
     if name == "compare_predictions_with_observations":
         return compare(action, ledger, review)
-    action = bind_reference_inputs(action, ledger, requested_metrics)
-    facts = select_facts(action, input_options(ledger))
+    action, facts = resolve_calculation_inputs(action, ledger, requested_metrics)
     subject = action.get("subject")
     if subject not in ledger.scenarios:
         raise ValueError("Calculations require a reviewed scenario")
@@ -234,13 +318,19 @@ def execute_tool(action, ledger, requested_metrics, *, review):
         required = derivation_inputs(action.get("operator"), {f.field: f.value for f in facts})
         facts = tuple(fact for fact in facts if fact.field in required)
     support, support_issues, invalidated = support_for(ledger, facts, conditions, subject)
+    from .calculation_steps import selected_target_bindings, selected_target_snapshot
+    selection = selected_target_snapshot(ledger)
+    selection_bindings = selected_target_bindings(facts, selection)
     if name == "calibrate_infectiousness":
         # Reuse the parent's support judgment; it does not authorize execution.
-        result = derive_parameter(lambda _: review, action, input_options(ledger), {})
+        result = derive_parameter(lambda _: review, action, facts, {})
         calculation = calculation_record(name, subject, facts, support,
             {f.field: {"value": f.value, "unit": f.unit} for f in result.facts},
             conditions=conditions, basis=action["basis"], operator=action["operator"],
             model_review=review, support_issues=support_issues,
+            selected_target_bindings=selection_bindings,
+            scenario_input_bindings=scenario_input_bindings(facts, ledger),
+            scenario_condition_bindings=scenario_condition_bindings(subject, conditions, ledger),
             scenario_parameter_links=scenario_parameter_links(facts, ledger),
             invalidated_dependencies=invalidated,
             output_fact_keys=[f.key for f in result.facts],
@@ -268,14 +358,22 @@ def execute_tool(action, ledger, requested_metrics, *, review):
         raise ValueError("A calculation needs a named parameterization")
     estimate.update(parameterization=parameterization, label=parameterization)
     estimate.update(assumption_keys=list(support), assumption_versions={k: a["version"] for k, a in support.items()},
+                    selected_target_bindings=selection_bindings,
                     assumption_claims={k: assumption_claim(a) for k, a in support.items()},
                     assumption_support=list(support.values()),
                     model_review=review, support_issues=support_issues, invalidated_dependencies=invalidated,
+                    scenario_input_bindings=scenario_input_bindings(facts, ledger),
+                    scenario_condition_bindings=scenario_condition_bindings(subject, conditions, ledger),
                     scenario_parameter_links=scenario_parameter_links(facts, ledger))
-    estimate["metric_support"] = {m: output_support(estimate, m, facts, ledger, review) for m in metrics}
+    estimate["metric_support"] = {m: output_support(estimate, m, facts, ledger, review, selection=selection) for m in metrics}
+    intermediate_view = {**estimate, "metrics": estimate["intermediate_outputs"],
+                         "metric_dependencies": estimate["intermediate_dependencies"]}
+    estimate["intermediate_support"] = {
+        field: output_support(intermediate_view, field, facts, ledger, review, selection=selection)
+        for field in estimate["intermediate_outputs"]}
     estimate["reasonableness"] = current_support(estimate, ledger.assumptions, ledger=ledger)
     derived = ()
-    if name == "calculate_geometry_and_removal" and not estimate["issues"]:
+    if not estimate["issues"]:
         derived = tuple(Fact(subject, field, row["value"], UNITS[field], "derived", row["formula"],
                             context=action["basis"], parents=tuple(f.key for f in facts
                                 if f.field in output_dependencies(estimate, field, derived=True)[0]))
@@ -283,13 +381,20 @@ def execute_tool(action, ledger, requested_metrics, *, review):
     calculation = calculation_record(name, subject, facts, support, estimate["metrics"],
         conditions=conditions, basis=action["basis"], output_fact_keys=[f.key for f in derived],
         model_review=review, support_issues=support_issues,
+        selected_target_bindings=selection_bindings,
+        scenario_input_bindings=scenario_input_bindings(facts, ledger),
+        scenario_condition_bindings=scenario_condition_bindings(subject, conditions, ledger),
         scenario_parameter_links=scenario_parameter_links(facts, ledger),
         invalidated_dependencies=invalidated,
         derived_parameters=estimate["derived_parameters"], parameterization=parameterization,
+        issues=estimate["issues"],
         calculation_variables=estimate["calculation_variables"],
         output_contracts=estimate["output_contracts"],
         metric_support=estimate["metric_support"],
-        derived_support={f.field: output_support(estimate, f.field, facts, ledger, review, derived=True) for f in derived})
+        intermediate_outputs=estimate["intermediate_outputs"],
+        intermediate_support=estimate["intermediate_support"],
+        derived_support={field: output_support(estimate, field, facts, ledger, review, derived=True, selection=selection)
+                         for field in estimate["derived_parameters"]})
     estimate["calculation_versions"] = [calculation["version"]]
     issues = tuple(dict.fromkeys([*support_issues, *estimate["issues"],
         *(item for row in estimate["metrics"].values() for item in row.get("missing", [])),
@@ -353,10 +458,15 @@ def compare(action, ledger, review):
 
 
 def tool_options(ledger):
+    from .calculation_steps import calculation_is_up_to_date
     return {key: {"version": c["version"], "tool": c["tool"], "subject": c["subject"],
                   "output": c["output"], "basis": c["basis"], "parameterization": c.get("parameterization"),
+                  "derived_parameters": c.get("derived_parameters", {}),
+                  "intermediate_outputs": c.get("intermediate_outputs", {}),
+                  "current_intermediate_metrics": [m for m in c.get("intermediate_outputs", {})
+                       if calculation_is_up_to_date(c, m, ledger)],
                   "current_support": current_support(c, ledger.assumptions, ledger=ledger),
-                  "current_computed_metrics": [m for m in c["output"] if current_computation(c, ledger.assumptions, m, ledger=ledger)],
+                   "current_computed_metrics": [m for m in c["output"] if calculation_is_up_to_date(c, m, ledger)],
                   "metric_support": {m: current_support(c, ledger.assumptions, metric=m, ledger=ledger)
                                      for m in c.get("metric_support", {})},
                   "model_review": c.get("model_review"), "support_issues": c.get("support_issues", []),

@@ -20,9 +20,10 @@ from ...task_executors.scenario_metrics.conditional import CONDITIONAL_INPUTS, c
 from .communication import decision_diagnostics, reading_coverage
 from .goal_state import GLOBAL_GOAL_PROGRESS, ScientificGoalState
 from .model_tiers import ModelTier, tier_for_operation
+from .model_defaults import retained_defaults
 from .progress import PARAMETER_EVIDENCE, parameter_requirements, parameter_support, progress_credit
 from .records import (Credit, Ledger, ResearchMessage, ResearchResult, diagnostic_value, condensed_diagnostics,
-                      identity, scenario_relation_key)
+                      identity, scenario_relation_key, target_value_model_view as target_value_decision_view)
 from .tools import TOOLS, tool_options
 
 
@@ -75,6 +76,93 @@ def selected_choice(value, options, field):
     return value
 
 
+def changed_records(result, inherited):
+    """Commit this episode's changes without replaying stale inherited claims."""
+    keyed = {"assumptions": lambda row: row["key"],
+             "scenarios": lambda row: row["subject"],
+             "source_event_types": lambda row: row["type_id"],
+             "source_target_relationships": lambda row: (
+                 row["source"], row["source_subject"], row["target_subject"], row["parameter"]),
+             "scenario_parameter_relations": scenario_relation_key,
+             "facts": lambda fact: fact.key}
+    changes = {}
+    for name in ResearchResult.__dataclass_fields__:
+        records = getattr(result, name)
+        if not isinstance(records, tuple):
+            continue
+        key = keyed.get(name, identity)
+        previous = {key(row): row for row in getattr(inherited, name)}
+        changes[name] = tuple(row for row in records
+                              if key(row) not in previous or previous[key(row)] != row)
+    return replace(result, **changes)
+
+
+def research_parameter_requirements(parameter, scenarios, subjects=()):
+    """Retained baselines are available premises, not research requirements."""
+    selected = [scenarios[name] for name in subjects if name in scenarios] if subjects else [
+        row for row in scenarios.values() if row.get("role", "target") == "target"]
+    retained = set.intersection(*(set(retained_defaults(row)) for row in selected)) if selected else set()
+    return parameter_requirements(parameter) - retained
+
+
+def calculation_decision_view(status, *, detailed):
+    """Small current decision table; full recipes and history stay in records."""
+    view = {name: status.get(name, 0) for name in
+            ("not_calculated", "calculated_up_to_date", "calculated_needs_updating", "points")}
+    if not detailed:
+        return view
+    view.update(columns=["subject", "field", "kind", "status", "computed_value", "unit", "points",
+                         "ready_to_calculate", "ready_to_recalculate", "matches_main_selection",
+                         "changed_inputs", "note_ids"], rows=[], notes=[])
+    note_ids = {}
+    for step in status.get("steps", ()):
+        changed, notes = set(), set()
+        if step.get("matches_main_selection") is False:
+            note = {"kind": "calculation_input_change",
+                    "parameterization": step.get("parameterization"),
+                    "inputs": step.get("main_input_differences", []),
+                     "reason": "The recorded calculation uses values that differ from the current main table and needs updating."}
+            key = identity(note)
+            if key not in note_ids:
+                note_ids[key] = len(view["notes"])
+                view["notes"].append(note)
+            notes.add(note_ids[key])
+        if step.get("uncredited_reason"):
+            note = {"kind": "calculation_credit", "review_status": step.get("review_status"),
+                    "reason": step.get("uncredited_reason")}
+            key = identity(note)
+            if key not in note_ids:
+                note_ids[key] = len(view["notes"])
+                view["notes"].append(note)
+            notes.add(note_ids[key])
+        if step.get("credit_basis"):
+            note = {"kind": "calculation_credit_basis", "reason": step["credit_basis"]}
+            key = identity(note)
+            if key not in note_ids:
+                note_ids[key] = len(view["notes"])
+                view["notes"].append(note)
+            notes.add(note_ids[key])
+        if step["status"] == "calculated_needs_updating":
+            for alternative in step.get("result_alternatives", ()):
+                for change in alternative.get("changed_dependencies", ()):
+                    if change.get("field"):
+                        changed.add(change["field"])
+                    # Raw claim hashes and repeated parameterization histories do
+                    # not help choose an action; retain the exact reason once.
+                    note = {key: change[key] for key in ("kind", "field", "reason") if key in change}
+                    key = identity(note)
+                    if key not in note_ids:
+                        note_ids[key] = len(view["notes"])
+                        view["notes"].append(note)
+                    notes.add(note_ids[key])
+        view["rows"].append([step["subject"], step["field"], step["kind"], step["status"],
+            step.get("computed_value"), step.get("unit"), step["points"],
+            step.get("ready_to_calculate", False), step.get("ready_to_recalculate", False),
+            step.get("matches_main_selection"),
+            sorted(changed), sorted(notes)])
+    return view
+
+
 class ResearchRun:
     def __init__(self, providers, limits, research_request, metrics, *, initial=None, scenario_selection=None):
         self.providers, self.limits = providers, limits
@@ -92,6 +180,7 @@ class ResearchRun:
         self.total_units = self.sequence = 0
         self.diagnostic_sequence = 0
         self.controller_specs = {}
+        self.live_controllers = {}
         self.sources = {}
         self.root_source = self.root_key = None
         root = Path(__file__).resolve().parents[2]
@@ -136,6 +225,7 @@ class ResearchRun:
             self.emit_trace("scenario_parameter_scope_initialized", model_calls=self.model_calls,
                 independent_values_needed=scope["recorded_target_inputs"]["required"],
                 scenario_parameter_relations=list(initial.scenario_parameter_relations),
+                calculation_steps=scope.get("calculation_steps", {}),
                 score_weights=scope["score_weights"])
 
     def emit_trace(self, kind, **payload):
@@ -173,16 +263,33 @@ class ResearchRun:
 
     def controller(self, path):
         focus, initial, scientific, outputs = self.controller_specs[path[-1][1]]
-        return ResearchController((GLOBAL_GOAL_PROGRESS,), window=self.limits.yield_window,
-                                  initial=initial, point_scores=True)
+        controller = ResearchController((GLOBAL_GOAL_PROGRESS,), window=self.limits.yield_window,
+                                        initial=initial, point_scores=True)
+        self.live_controllers[path] = controller
+        return controller
 
-    def root_credit_projection(self):
+    def root_credit_projection(self, status=None):
         """Read-only root score from the shared admitted ledger, including nested child work."""
         if self.root_key is None:
             return None
-        credit = self.root_source.credit(self.global_goal.ledger.result())
-        controller = self.controller((("root", self.root_key),))
-        return controller.observe("shared_goal_projection", credit, is_root=True).score
+        return (self.global_goal.preview() if status is None else status)["weighted_score"]
+
+    def refresh_controllers(self, source, status):
+        """Update active ancestor scores without adding yield observations."""
+        current_path = next((path for path in self.live_controllers
+                             if path[-1][1] == source.controller_key), None)
+        if current_path is None:
+            return
+        credit = self.global_goal.credit_from_status(status)
+        for path, controller in self.live_controllers.items():
+            if current_path[:len(path)] != path:
+                continue
+            gain = controller.refresh(credit)
+            if gain:
+                self.emit_trace("shared_credit_refreshed", episode_path=[list(item) for item in path],
+                    source_episode_id=source.goal.goal_id, model_calls=self.model_calls,
+                    gain=gain, score=controller.state().score,
+                    meaning="Current shared score changed; completed-unit yield history is unchanged.")
 
     def agent(self, request, *, completing=False, tier=None):
         if self.provider_unavailable is not None:
@@ -242,6 +349,8 @@ class ResearchRun:
     def episode(self, grain, source, *, goal, focus, contract=None, proposal=None):
         self.sequence += 1
         key = f"{grain}:{self.sequence}"
+        source.controller_key = key
+        source.episode_grain = grain
         source.focus = tuple(focus) if contract is None else (PARAMETER_EVIDENCE, GLOBAL_GOAL_PROGRESS)
         source.scientific = grain in SCIENTIFIC
         source.goal = goal
@@ -250,8 +359,12 @@ class ResearchRun:
         source.requested_subjects = tuple(contract.measurements.get("subjects", ())) if contract else ()
         if contract is not None:
             source.parameter = contract.measurements.get("parameter")
-            source.parameter_requirements = parameter_requirements(source.parameter)
+            source.parameter_requirements = research_parameter_requirements(
+                source.parameter, source.ledger.scenarios, source.requested_subjects)
         self.controller_specs[key] = (source.focus, source.credit(source.ledger.result()), source.uses_scientific_credit(), source.output_fields)
+        # Capture before descendants run, including inherited operands. A
+        # suspended ancestor must notice work committed inside its child.
+        source.return_baseline = source.return_progress()
         if grain == "evaluate_airborne_safety_guideline":
             self.root_source, self.root_key = source, key
         episode = Episode(self.grains[grain], key, source, EpisodeRequest(
@@ -289,6 +402,11 @@ class ResearchSource:
         self.credit_subjects = None
         self.output_fields = None
         self.pending = None
+        self.pending_global = None
+        self.controller_key = None
+        self.episode_grain = None
+        self.return_baseline = None
+        self.cooperative_return_reason = ""
         self.failure = ""
         self.completion_diagnostic = None
         self.evaluated_units = 0
@@ -314,7 +432,7 @@ class ResearchSource:
             })
 
     def build_result(self, record):
-        reason = self.failure or (record.controller_state.reason if record.ended_by == "yield_stop" else record.ended_by)
+        reason = self.cooperative_return_reason or self.failure or (record.controller_state.reason if record.ended_by == "yield_stop" else record.ended_by)
         if self.failure and self.completion_diagnostic is None:
             self.completion_diagnostic = self.run.identify_diagnostic({
                 "stage": "episode_completion",
@@ -345,7 +463,8 @@ class ResearchSource:
             previous_parameter_relations = dict(self.run.global_goal.ledger.scenario_parameter_relations)
             previous_assumptions = dict(self.run.global_goal.ledger.assumptions)
             previous_estimates = set(self.run.global_goal.ledger.estimates)
-            global_status = self.run.global_goal.commit(self.pending)
+            global_status = self.run.global_goal.commit(self.pending_global or self.pending)
+            self.run.refresh_controllers(self, global_status)
             changed_relations = [row for key, row in self.run.global_goal.ledger.source_target_relationships.items()
                                  if previous_relations.get(key) != row]
             changed_parameter_relations = [row for key, row in self.run.global_goal.ledger.scenario_parameter_relations.items()
@@ -388,13 +507,15 @@ class ResearchSource:
                 self.run.emit_trace("calculation_inputs_selected", episode_type=type(self).__name__,
                     model_calls=self.run.model_calls, scenario_subject=row.get("subject"),
                     scenario_role=scenario.get("role", "unregistered_source_context"),
+                    input_source="main_table" if scenario.get("role", "target") == "target" else "source_records",
                     parameterization=row.get("label"), parameters=row.get("parameters"),
                     assumption_versions=row.get("assumption_versions", {}),
                     calculated_outputs=[name for name, output in row.get("metrics", {}).items()
                                         if output.get("status") == "calculated"])
-            root_projection = self.run.root_credit_projection()
+            root_projection = self.run.root_credit_projection(global_status)
             if (global_status["scores"] != before_goal["scores"]
                     or global_status["target_inputs"] != before_goal["target_inputs"]
+                    or global_status.get("calculation_steps") != before_goal.get("calculation_steps")
                     or changed_relations or changed_parameter_relations):
                 self.run.emit_trace("global_goal_progress", episode_type=type(self).__name__,
                     unit=unit.label, model_calls=self.run.model_calls,
@@ -408,10 +529,10 @@ class ResearchSource:
                     target_assumptions=global_status["target_assumptions"],
                     recorded_target_inputs=global_status["recorded_target_inputs"],
                     independent_target_values=global_status["independent_target_values"],
+                    calculation_steps=global_status.get("calculation_steps", {}),
                     target_inputs=global_status["target_inputs"],
                     source_target_learning=global_status["source_target_learning"],
                     calibration=global_status["calibration"],
-                    computed_outputs=global_status["computed_outputs"],
                     requested_outputs=global_status["requested_outputs"])
             self.evaluated_units += int(self.pending.evaluated)
             if self.run.providers.event:
@@ -424,7 +545,7 @@ class ResearchSource:
                     "target_assumptions": global_status["target_assumptions"],
                     "recorded_target_inputs": global_status["recorded_target_inputs"],
                     "source_target_learning": global_status["source_target_learning"],
-                    "computed_outputs": global_status["computed_outputs"],
+                    "calculation_steps": global_status.get("calculation_steps", {}),
                     "requested_outputs": global_status["requested_outputs"]})
             self.run.emit_trace("credit_verdict", episode_id=self.goal.goal_id,
                 episode_type=type(self).__name__, question=str(self.goal.objective), focus=list(self.focus),
@@ -434,25 +555,65 @@ class ResearchSource:
                 parameter=self.parameter, parameter_evidence=self.information_assessment,
                 model_calls=self.run.model_calls, issues=new_issues, diagnostics=new_diagnostics)
             self.pending = None
+            self.pending_global = None
 
     def assess(self, result):
-        """Source admission and investigation reasonableness remain mandatory."""
+        """Validate/register records before the shared candidate pipeline."""
+        return result
+
+    def review_registered_candidates(self, result):
+        """Optional scientific support review after common candidate selection."""
         return result
 
     def project(self, result):
         self.pending = self.assess(result)
+        inherited = self.ledger.result()
+        committed = self.run.global_goal.ledger.result()
+        working = Ledger(committed)
+        working.merge(changed_records(self.pending, inherited))
+        from .relevance import assess_numeric_target_relationships
+        from .target_values import project_source_target_values, target_value_candidates
+        candidates = target_value_candidates(working)
+        try:
+            working.merge(assess_numeric_target_relationships(working,
+                self.run.providers.source_target_assessor,
+                disease=self.run.context.get("disease_of_interest"), candidates=candidates))
+        except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+            # An unavailable relevance grade leaves a found value ungraded;
+            # it does not discard it or postpone its target-value projection.
+            working.merge(self.failure_result(exc, "source_value_relevance"))
+        working.merge(project_source_target_values(working, candidates=candidates))
+        before_review = working.result(evaluated=self.pending.evaluated,
+                                       stop_reason=self.pending.stop_reason)
+        reviewed = self.review_registered_candidates(before_review)
+        if reviewed != before_review:
+            working.merge(changed_records(reviewed, before_review))
+            # A review may identify a genuine source/provenance error.
+            # Reproject availability without a second JEV assessment or a
+            # support threshold for otherwise valid numeric candidates.
+            working.merge(project_source_target_values(working))
+        self.pending = working.result(evaluated=reviewed.evaluated,
+                                      stop_reason=reviewed.stop_reason)
         self.pending = replace(self.pending, diagnostics=tuple(
             self.run.identify_diagnostic(d) for d in self.pending.diagnostics))
-        accumulated = Ledger(self.ledger.result())
-        accumulated.merge(self.pending)
-        return self.credit(accumulated.result(evaluated=self.pending.evaluated))
+        self.pending_global = changed_records(self.pending, committed)
+        # Local evidence assessment still sees the full branch; shared credit
+        # receives only its new records, so old inherited claims cannot replace
+        # a more recent judgment already committed by another episode.
+        self.assess_information(self.pending)
+        return self.run.global_goal.credit(self.pending_global)
 
     def uses_scientific_credit(self):
         return self.scientific
 
     def credit(self, result):
+        self.assess_information(result)
+        return self.run.global_goal.credit(changed_records(result, self.ledger.result()))
+
+    def assess_information(self, result):
+        """Keep the local contract assessment separate from shared projection."""
         if self.uses_scientific_credit():
-            return self.run.global_goal.credit(result)
+            return
         if (self.parent_contract is not None
                 and self.parent_contract.measurements.get("deliverable") == "source_findings"
                 and self.parent_contract.measurements.get("target_scenarios") is not None):
@@ -462,11 +623,10 @@ class ResearchSource:
             groups = {row["type_id"]: row for row in result.source_event_types}
             self.information_assessment, _ = target_relevance_credit(
                 result, self.parameter_requirements, groups, targets, parameter=self.parameter)
-            return self.run.global_goal.credit(result)
+            return
         self.information_assessment = parameter_support(result, self.parameter_requirements,
             hypotheses_only=self.parent_contract.measurements.get("deliverable") == "assumption_hypotheses",
             subjects=self.requested_subjects)
-        return self.run.global_goal.credit(result)
 
     def evidence_handoff_ready(self):
         """Return new parameter evidence promptly for a higher-level scientific decision."""
@@ -475,6 +635,42 @@ class ResearchSource:
             self.evidence_handoff_baseline = points
             return False
         return self.evaluated_units > 0 and points > self.evidence_handoff_baseline + 1e-9
+
+    def return_progress(self):
+        """Decision changes, independent of evidence grades and credit amounts."""
+        from .target_values import eligible_source_values
+
+        status = self.run.global_goal.preview()
+        targets = identity([
+            [(row["group_id"], row["found"], row.get("value"), row.get("unit"))
+             for row in status["independent_target_values"]],
+            [(row["subject"], row["field"], row["status"], row.get("computed_value"),
+              row.get("unit"), row.get("ready_to_calculate"), row.get("ready_to_recalculate"))
+             for row in status.get("calculation_steps", {}).get("steps", ())],
+        ])
+        operands = frozenset(identity([fact.subject, fact.field, fact.value, fact.unit])
+            for fact in eligible_source_values(self.run.global_goal.ledger)
+            if fact.field in self.parameter_requirements)
+        return targets, operands
+
+    def cooperative_return_ready(self, view):
+        """Unwind at an ordinary unit boundary; never preempt running work."""
+        if (self.episode_grain in {None, "evaluate_airborne_safety_guideline"}
+                or not view.units_consumed or self.return_baseline is None):
+            return False
+        targets, operands = self.return_progress()
+        old_targets, old_operands = self.return_baseline
+        reason = ("target_progress_changed" if targets != old_targets else
+                  "new_calculation_operands" if self.episode_grain != "investigate"
+                  and operands - old_operands else "")
+        if not reason:
+            return False
+        self.cooperative_return_reason = reason
+        self.run.emit_trace("cooperative_return", episode_id=self.goal.goal_id,
+            episode_type=type(self).__name__, reason=reason,
+            completed_units=view.units_consumed, model_calls=self.run.model_calls,
+            meaning="Return committed results after a completed own unit so the parent can choose its next action; controller observations are unchanged.")
+        return True
 
     def receive(self, result, completion, request):
         if not isinstance(result, ResearchResult):
@@ -587,7 +783,7 @@ class ResearchSource:
                         for name in CONDITIONAL_INPUTS},
                     "quantities": {name: metric_catalog_record(name) for name in METRICS},
                     "interpretation": "Executable repository kernels, not retrieved evidence or independent validation. "
-                        "Calculations can explore recorded guesses; evidence support affects credit and "
+                         "Target calculations use the main table, including its current estimates; evidence support affects credit and "
                         "conclusions, not execution. Calculated behavior is not empirical evidence. Missing source equations "
                         "do not imply a missing kernel; investigate fidelity when consequential. "
                         "An existing kernel may still have no applicable route for a selected case. Parameter constraints "
@@ -635,6 +831,13 @@ class ResearchSource:
         if self.failure:
             return SourceEnd("source_failed")
         try:
+            if self.cooperative_return_ready(view):
+                return None
+            # A parent may have been suspended while a child revised a premise.
+            # Its next calculation must use the current main-table inputs.
+            # Distinct hypothesis keys remain
+            # alternatives; only matching record identities receive revisions.
+            self.ledger.merge(self.run.global_goal.ledger.result())
             self.last_proposal = None
             return self.propose(view)
         except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
@@ -643,7 +846,9 @@ class ResearchSource:
 
     def inputs(self, view, **kwargs):
         communication = self.communication_context()
-        global_status = self.run.global_goal.preview(self.ledger.result())
+        global_status = self.run.global_goal.preview()
+        calculation_table = calculation_decision_view(
+            global_status.get("calculation_steps", {}), detailed=self.scientific)
         return view.model_inputs({
             "objective": str(view.goal.objective), "context": self.context(),
             "global_scientific_goal": {
@@ -653,13 +858,15 @@ class ResearchSource:
                 "target_routes": {name: row["best_route"] for name, row in global_status["target_routes"].items()},
                 "target_assumptions": global_status["target_assumptions"],
                 "recorded_target_inputs": global_status["recorded_target_inputs"],
-                "independent_target_values": global_status["independent_target_values"],
-                "target_inputs": global_status["target_inputs"],
+                "independent_target_values": [target_value_decision_view(row)
+                                              for row in global_status["independent_target_values"]],
+                "calculation_steps": calculation_table,
+                "target_inputs": {subject: {field: target_value_decision_view(row) for field, row in fields.items()}
+                                  for subject, fields in global_status["target_inputs"].items()},
                 "source_target_learning": global_status["source_target_learning"],
                 "calibration": global_status["calibration"],
-                "computed_outputs": global_status["computed_outputs"],
                 "requested_outputs": global_status["requested_outputs"],
-                "meaning": "Shared admitted Goal projection. Recorded target values include conditional hypotheses before independent review; target_assumptions counts supported or provisional reviews. Route counts use reviewed inputs and conditions, not completed calculations. The numerical controller credits only new progress above inherited state."},
+                "meaning": "Current shared Goal projection, updated after each child verdict before its return. One calculation_steps table contains requested outputs and intermediates, their computed values and units, status, credit, and readiness. Rows use calculation_steps.columns; note_ids indexes calculation_steps.notes. Root and investigation receive the table; acquisition children receive its counts and credit. The three statuses are not_calculated, calculated_up_to_date, and calculated_needs_updating. Target calculations automatically use the current main-table values, fixed inputs, retained defaults and current computed inputs. Calculation requests do not select numeric alternatives. Status describes numerical execution and whether the used inputs match the current main table; credit and review are separate. Notes explain changed dependencies or why completed arithmetic earns zero credit, including its review status. A row's ready_to_recalculate flag describes availability of main-table inputs and model conditions. The episode determines which operation to run. A previously successful calculation retains only its method credit while its numerical result is obsolete. Recorded target values include conditional hypotheses before independent review; target_assumptions counts supported or provisional reviews. Route counts describe input availability, not completed calculations."},
             "own_findings": [f for f in self.ledger.findings if f not in self.communicated["findings"]],
             "own_unresolved": communication["uncertainties"],
             "failure_implications": communication["failures"],
@@ -668,20 +875,9 @@ class ResearchSource:
                                     "alternative_values": len(row["alternatives"])}
                                    for row in self.information_assessment if "field" in row],
             "source_event_type_progress": [row for row in self.information_assessment if "type_id" in row],
-            "numeric_yield": {"history": list(view.controller_state.history), "reason": view.controller_state.reason,
-                "score_meaning": getattr(self, "credit_meaning_override", None) or ("Accumulated evidence-linked parameter learning and computed-output progress across scoped scenarios, with fixed requirement-group weights; "
-                    "not a completion fraction. New empty scenarios earn zero and do not dilute prior progress. "
-                    "A current numerical consequence earns a small progress floor even with zero evidence support; "
-                    "outbreak inversion and its use in target outputs have distinct, deduplicated contributions; "
-                    "repetition earns no gain. Genuine contrary evidence can advance learning while current "
-                    "support or calculation validity falls; an identified evidence-record error retracts its credit. "
-                    "Evidence strength and report coverage are separate." if self.uses_scientific_credit() else
-                    "One point per filled calculation input within the assigned parameter's fixed dependencies, "
-                    "plus 0.1 for distinct corroboration or independently reviewed refinement/correction. "
-                    "Previously justified learning survives genuine contradiction, but invalid evidence does not. "
-                    "Alternative values or events do not "
-                    "create new scored elements. Inherited evidence is the initial baseline, not new gain. "
-                    "Queries, objectives and source breadth cannot change the scoring criteria. "
-                    "Points are not confidence or a judgment that a question is partially answered.")},
+            "numeric_yield": {"score": view.controller_state.score,
+                "history": list(view.controller_state.history), "reason": view.controller_state.reason,
+                "history_meaning": "History records this episode's completed-unit observations. Current score includes committed child changes before their return; a refresh is not another yield observation.",
+                "score_meaning": "The same global scientific score drives every episode: found independent target values plus calculation-step credit, using global_scientific_goal.score_weights. Extracted, calculated and inferred values enter the same candidate pipeline; the highest field-specific relevance selects the current value, without an admission threshold or priority by origin. Provenance and scientific support remain explicit. A replacement does not create another independent value. Local parameter_progress describes this branch's evidence and is not its controller score. Scores refresh after committed child work before return; repetition earns no gain. Calculation credit can decrease when its inputs change. This score is not confidence or a completion fraction."},
             **kwargs,
         }, reports=view.child_reports)

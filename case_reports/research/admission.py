@@ -1,4 +1,4 @@
-"""Deterministic quotation/unit checks and a separate applicability review."""
+"""Check source fidelity and units; target relevance is assessed downstream."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from .assumptions import text as required_text
 CONVERSIONS = {
     ("m3/h", "m3/s"): 1/3600, ("m3/min", "m3/s"): 1/60,
     ("L/s", "m3/s"): 0.001,
-    ("L/min", "m3/s"): 1/60000, ("h", "s"): 3600, ("min", "s"): 60,
+    ("L/min", "m3/s"): 1/60000, ("cm3/min", "m3/s"): 1e-6/60,
+    ("h", "s"): 3600, ("min", "s"): 60,
     ("1/h", "1/s"): 1/3600, ("ACH", "1/s"): 1/3600,
     ("um", "m"): 1e-6, ("cm2", "m2"): 1e-4, ("mL", "m3"): 1e-6,
     ("m/h", "m/s"): 1/3600, ("cm/s", "m/s"): 0.01, ("%", "fraction"): 0.01,
@@ -191,12 +192,18 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
             "Filtration efficiency is not penetration, per-person flow is not total flow, and RNA "
             "concentration is not a virion or quanta concentration. Related measurements can support "
             "later explicit inferences but must not be relabeled as those inferred quantities. "
-            "For a fixed parameter assignment in parent_information_contract, a numeric fact must "
-            "also supply the parameter itself or a useful ingredient of a defensible derivation "
-            "of that parameter. Explain that contribution in basis without performing the inference. "
-            "A matching field name or a number in a related paper is not sufficient. Preserve "
-            "merely contextual numbers in qualitative evidence with their original quantities, "
-            "units, roles and limitations instead of treating them as usable numeric inputs. "
+            "Capture source-supported scalar values for the requested target cases' parameters "
+            "and their derivation ingredients, including fields outside this branch's assigned "
+            "parameter. The local question guides reading, not which faithful values may be retained. "
+            "Keep a native numeric value even when its activity, population, variant or setting "
+            "differs from the current target, or its use needs other inputs or a transfer assumption. "
+            "For example, a recipient inhalation rate remains a breathing-flow value with that "
+            "recipient role in context; it need not independently determine source infectiousness. "
+            "Different activity-specific emission rates remain separate source model parameters. "
+            "Do not downgrade a supported scalar to qualitative context because it cannot answer "
+            "the current question alone. Target relevance and applicability are graded downstream. "
+            "Retain the actual source subject and its conditions; extraction does not assign the "
+            "value to a target case. Explain possible uses and limitations in basis. "
             "Do not put population labels in unit: record human counts in person or count, unitless values in "
             "dimensionless, and percentages in %. Retain the counted population in context. "
             "If OCR or flattened "
@@ -285,8 +292,11 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
     admitted, evidence = [], []
     if candidates:
         decisions = review_candidates(agent, {
-            "operation": "review_research_evidence", "objective": objective,
-            "context": context, "source": source, "source_text": text,
+            "operation": "review_research_evidence",
+            "objective": "Verify each candidate's faithful representation of its native source quantity and context.",
+            "context": {"review_scope": "source_faithfulness_only",
+                        "target_relevance": "Graded separately; not a reason to reject a faithful source record."},
+            "source": source, "source_text": text,
             "available_source_spans": spans,
             "candidates": [{"option": i, "raw": raw, "normalized": fact.semantic_record() if isinstance(fact, Fact) else fact,
                             **({"unit_conversion": {"printed_value": raw["value"], "printed_unit": raw["unit"],
@@ -301,28 +311,23 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
                 "units after the explicit unit_conversion. Check that conversion rather than requiring "
                 "the canonical number to occur verbatim in the source. Raw basis text refers to the "
                 "printed representation, not a claim that normalization did not happen. "
-                "Check event identity, disease/strain/population/activity, whether it is observation, "
-                "a fitted parameter or a hypothetical scenario. Reject incompatible assignment to the "
-                "target, ventilation mistaken for total loss, RNA copies mistaken for quanta, and "
-                "unsupported extrapolation. A quote match alone does not establish applicability."
-                " For a fixed parameter assignment in context.parent_information_contract, "
-                "admit a numeric fact only when it is both faithful to the source and useful "
-                "as direct evidence or a defensible derivation ingredient for that parameter. "
-                "State that numerical contribution in the decision reason. The derivation may "
-                "still need other ingredients; incomplete evidence is not a reason to reject "
-                "a useful ingredient. Mere membership in a possible derivation's field list "
-                "does not establish usefulness. Preserve native measurement roles: an apparatus "
-                "sampling duration is not a susceptible person's exposure duration, and an "
-                "outcome from one exposure route is not an outcome from another. A source's "
-                "hypothetical room inputs do not estimate the assigned infectiousness merely "
-                "because they describe a room. Require an explicit defensible connection, "
-                "without demanding identical source and target scenarios. Contextual or "
-                "indirect qualitative records remain separately admissible; admitting their "
-                "truth does not admit an unusable numeric input."
+                "Check that event identity, disease/strain/population/activity and the distinction "
+                "between observations, fitted parameters and hypothetical scenarios faithfully "
+                "describe the SOURCE. Admit every faithfully represented native value. A different "
+                "activity, population, variant, setting, weak target relevance, missing companion "
+                "input or need for transfer is never a reason to reject it. This review does not "
+                "decide whether a source value should be used for a target. Existing source-target "
+                "relevance and target-input assessments make that decision separately. "
+                "Reject errors of source representation: ventilation relabeled as total loss, RNA "
+                "copies relabeled as quanta, a modeled value called a measurement, or an invented "
+                "value or source attribution. Preserve native roles in context: recipient inhalation "
+                "is a breathing flow even when it is not a matched source exhalation rate. "
+                "A source's hypothetical room inputs remain source model parameters; they need "
+                "not estimate the parameter of the current investigation. Do not require a "
+                "numerical contribution to that local question. "
                 " Qualitative claims must be entailed by the quoted passage. Their fields are relevance "
                 "tags, not assertions that the source directly measures those quantities. A related "
-                "measurement or model relation can inform a downstream parameter when the basis "
-                "explains a legitimate indirect connection. Judge that connection; do not reject a "
+                "measurement or model relation can inform a downstream parameter. Do not reject a "
                 "source-supported claim merely because a relevance tag names an inferred quantity. "
                 "Reject unjustified tags or a claim that equates distinct physical quantities. "
                 "This does not relax numeric fact field/value/unit identity or license inventing "
@@ -341,7 +346,7 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
                         "items": {"type": "object", "additionalProperties": False,
                             "required": ["option", "admit", "reason"], "properties": {
                                 "option": {"type": "integer", "enum": list(range(len(candidates)))},
-                                "admit": {"type": "boolean"},
+                                "admit": {"type": "boolean", "description": "True for a faithful native source record, regardless of target relevance. False only for an error in source representation, quantity, attribution or entailment."},
                                 "reason": {"type": "string", "minLength": 1}}}}}},
         }, source_version)
         for decision in decisions:

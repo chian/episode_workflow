@@ -6,15 +6,16 @@ from collections import defaultdict
 
 from ...task_executors.scenario_metrics.dependencies import input_requirements
 from .modeling import derivation_inputs
-from .progress import evidence_key, parameter_requirements
-from .records import Credit, Ledger, ResearchResult, current_computation, identity
+from .progress import evidence_key, parameter_requirements, found_parameter_progress
+from .records import Credit, Ledger, ResearchResult, identity
 from .relevance import source_profiles, target_comparison_context
 from .scenario_sharing import applicable_assumptions, independent_groups, needed_fields
+from .calculation_steps import calculation_step_status
 
 
 GLOBAL_GOAL_PROGRESS = "global_goal_progress"
 OUTBREAK_OPERATORS = ("cq_from_steady_outbreak", "cq_from_transient_outbreak")
-GLOBAL_SCORE_WEIGHTS = {"admitted_progress": 1.0}
+GLOBAL_SCORE_WEIGHTS = {"found_parameters": 1.0, "calculation_steps": 1.0}
 
 
 def _route_family(route):
@@ -27,12 +28,15 @@ def _route_family(route):
 
 
 def _available(ledger, subject):
-    numeric = {fact.field for fact in ledger.facts.values() if fact.subject == subject}
+    from .tools import main_calculation_inputs
+
+    numeric = {fact.field for fact in main_calculation_inputs(ledger, subject)}
     conditions = set()
     for assumption, _relation in applicable_assumptions(ledger, subject):
         if assumption.get("review", {}).get("verdict") not in {"fixed_condition", "supported", "provisional"}:
             continue
-        (numeric if assumption["value"] is not None else conditions).add(assumption["field"])
+        if assumption["value"] is None:
+            conditions.add(assumption["field"])
     return numeric, conditions
 
 
@@ -168,10 +172,6 @@ def scientific_goal_status(result, metrics):
     ledger = Ledger(result)
     targets = _target_routes(ledger, metrics)
     calibration = _calibration_readiness(ledger)
-    current = ledger.assumptions
-    computed = sum(any(estimate["subject"] == subject and current_computation(estimate, current, metric, ledger=ledger)
-                       for estimate in ledger.estimates.values())
-                   for subject in targets for metric in metrics)
     requested = len(targets) * len(metrics)
     route_fractions = [alternative["fraction"] for row in targets.values()
                        for alternative in row["alternatives"]]
@@ -179,17 +179,15 @@ def scientific_goal_status(result, metrics):
     for subject, row in targets.items():
         row["needs"] = sorted(needed_fields(ledger.scenarios[subject]))
     source_learning = _source_target_learning(result, ledger, targets)
+    independent = found_parameter_progress(result, ledger=ledger)
+    selected_groups = {(subject, row["parameter"]): row for row in independent
+                       for subject in row["subjects"]}
     target_inputs = {}
     for subject, row in targets.items():
         fields = {}
         for field in row["needs"]:
-            assessments = [(a, relation) for a, relation in applicable_assumptions(ledger, subject)
-                           if a.get("field") == field]
-            usable = [item for item in assessments if item[0].get("review", {}).get("verdict") in {"supported", "provisional"}]
-            choices = usable or assessments
-            selected = max(choices, key=lambda item: (item[0].get("reasonableness", 0),
-                1 if item[1] is None else 0)) if choices else None
-            current, relation = selected if selected else (None, None)
+            group = selected_groups.get((subject, field))
+            current = ledger.assumptions.get(group["selected_assumption_key"]) if group else None
             if current is None:
                 fields[field] = {"status": "missing"}
                 continue
@@ -201,38 +199,33 @@ def scientific_goal_status(result, metrics):
                              "value": current["value"], "unit": current["unit"],
                              "statement": current["statement"],
                              "origin_subject": current["subject"],
-                             "scope_group_id": relation["group_id"] if relation else None}
+                             "scope_group_id": group["group_id"],
+                             "selected_assumption_key": current["key"],
+                             "source_applicability": current.get("source_applicability")}
         target_inputs[subject] = fields
-    independent = []
-    for group in independent_groups(ledger):
-        assessments = [a for a in ledger.assumptions.values()
-                       if a.get("subject") in group["subjects"] and a.get("field") == group["parameter"]
-                       and a.get("value") is not None and a.get("role") not in
-                       {"scenario_constraint", "request_constraint"}]
-        found = [a for a in assessments if a.get("review", {}).get("verdict") != "contradicted"]
-        reviewed = [a for a in found if a.get("review", {}).get("verdict") in {"supported", "provisional"}]
-        independent.append({"group_id": group["group_id"], "parameter": group["parameter"],
-            "subjects": group["subjects"], "found": bool(found), "reviewed": bool(reviewed),
-            "origin_subject": (reviewed or found)[-1]["subject"] if reviewed or found else None})
     recorded_target_inputs = sum(row["found"] for row in independent)
     required_target_inputs = len(independent)
     assumption_coverage = {"fulfilled": sum(row["reviewed"] for row in independent),
                            "required": len(independent)}
-    from .assumptions import scientific_credit
-    groups = independent_groups(ledger)
-    focus = tuple(sorted({group["parameter"] for group in groups} | set(metrics)))
-    credit = scientific_credit(result, focus, outputs=metrics)
-    components = [{"field": field, "element": element, "points": points}
-                  for field, element, points in credit.qualities]
-    scores = {"admitted_progress": round(sum(row["points"] for row in components), 10)}
+    components = [{"category": "found_parameters", "field": row["parameter"],
+                   "element": "group:" + row["group_id"], "points": row["points"],
+                   "discovery_points": row["discovery_points"], "learning_bonus": row["learning_bonus"]}
+                  for row in independent]
+    calculations = calculation_step_status(result, metrics)
+    scores = {"found_parameters": round(sum(row["points"] for row in components), 10),
+              "calculation_steps": calculations["points"]}
+    components.extend({"category": "calculation_steps", "field": row["field"],
+                       "element": row["subject"], "points": row["points"], "status": row["status"]}
+                      for row in calculations["steps"])
     return {"target_routes": targets, "calibration": calibration,
             "target_assumptions": assumption_coverage,
             "recorded_target_inputs": {"recorded": recorded_target_inputs,
                                        "required": required_target_inputs},
             "independent_target_values": independent,
+            "calculation_steps": calculations,
             "target_inputs": target_inputs,
             "source_target_learning": source_learning,
-            "computed_outputs": computed, "requested_outputs": requested,
+            "requested_outputs": requested,
             "credit_components": components,
             "scores": scores,
             "weighted_score": round(sum(scores[name] * weight for name, weight in GLOBAL_SCORE_WEIGHTS.items()), 10),
@@ -258,6 +251,10 @@ class ScientificGoalState:
 
     def credit(self, contribution=None):
         status = self.preview(contribution)
-        return Credit(evaluated=contribution.evaluated if contribution is not None else True,
+        return self.credit_from_status(status, evaluated=contribution.evaluated if contribution is not None else True)
+
+    @staticmethod
+    def credit_from_status(status, *, evaluated=True):
+        return Credit(evaluated=evaluated,
                       qualities=((GLOBAL_GOAL_PROGRESS, "admitted_progress", status["weighted_score"]),),
-                      quality_resolution=0.1)
+                      quality_resolution=0.025)

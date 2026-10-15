@@ -3,29 +3,41 @@
 import json
 import unittest
 
-from episodic_workflow.case_reports.research.assumptions import assess_assumption
-from episodic_workflow.case_reports.research.records import Fact, Ledger, ResearchResult, current_support
+from episodic_workflow.case_reports.research.assumptions import unassessed_assumption
+from episodic_workflow.case_reports.research.records import Fact, Ledger, ResearchResult, current_support, numeric_references
 from episodic_workflow.case_reports.research.report import scenario_results
-from episodic_workflow.case_reports.research.tools import execute_tool, input_options, support_for
+from episodic_workflow.case_reports.research.tools import execute_tool, main_calculation_inputs, support_for
 from episodic_workflow.task_executors._http import ProviderError
 from episodic_workflow.task_executors.scenario_metrics.evaluate import UNITS
+from episodic_workflow.task_executors.scenario_metrics.dependencies import CALCULATED_PARAMETER_FIELDS
 from episodic_workflow.tests.test_research import AdaptiveAgent, METRICS, run_synthetic, supported_review
 
 
 def guessed_ledger(values):
-    ledger = Ledger(ResearchResult(scenarios=({"subject": "target", "description": "Synthetic hypothesis test"},)))
+    ledger = Ledger(ResearchResult(scenarios=({"subject": "target", "description": "Synthetic hypothesis test",
+        "assumption_needs": [field for field in values if field not in CALCULATED_PARAMETER_FIELDS]},)))
     for field, value in values.items():
-        result = assess_assumption(lambda r: supported_review(r, grade=0, verdict="unsupported"),
-            {"subject": "target", "field": field, "value": value, "unit": UNITS[field],
-             "statement": "Explicit synthetic guess", "basis": "No supporting evidence yet", "evidence": []}, ledger, {})
-        ledger.merge(result)
+        row = unassessed_assumption({"subject": "target", "field": field, "value": value,
+            "unit": UNITS[field], "statement": "Explicit synthetic guess",
+            "basis": "No supporting evidence yet"}, ledger)
+        if field in CALCULATED_PARAMETER_FIELDS:
+            # These tests supply a boundary condition, not a discovered target
+            # intermediate that the calculator is allowed to choose ad hoc.
+            ledger.scenarios["target"].setdefault("fixed_parameters", {})[field] = {
+                "value": value, "unit": UNITS[field]}
+            row.update(role="scenario_constraint", reasonableness=1.,
+                       review={"verdict": "fixed_condition", "completed": True})
+        ledger.merge(ResearchResult(assumptions=(row,)))
     return ledger
 
 
 def calculate(ledger, *, review=None, **changes):
     action = {"action": "calculate_geometry_and_removal", "subject": "target",
-              "facts": list(input_options(ledger)), "metrics": [], "basis": "Synthetic conditional calculation",
+              "metrics": [], "basis": "Synthetic conditional calculation",
               **changes}
+    if ledger.scenarios[action["subject"]].get("role", "target") != "target":
+        action["source_inputs"] = [key for key, fact in numeric_references(ledger).items()
+                                  if fact.subject == action["subject"]]
     return execute_tool(action, ledger, tuple(action["metrics"]), review=review or {
         "admit": True, "reason": "Synthetic conditional test", "limitations": []})
 
@@ -35,7 +47,8 @@ class CalculationSupportTests(unittest.TestCase):
         ledger = guessed_ledger({"floor_area_m2": 40, "room_height_m": 2.5})
         self.assertFalse(ledger.facts)
         self.assertFalse(ledger.evidence_options())
-        self.assertEqual(set(input_options(ledger)), {"assumption:1", "assumption:2"})
+        self.assertEqual({fact.field for fact in main_calculation_inputs(ledger, "target")},
+                         {"floor_area_m2", "room_height_m"})
         result = calculate(ledger)
         self.assertEqual(result.facts[0].field, "room_volume_m3")
         self.assertEqual(result.facts[0].value, 100)
@@ -49,6 +62,7 @@ class CalculationSupportTests(unittest.TestCase):
 
     def test_negative_scientific_review_does_not_prevent_calibration(self):
         ledger = guessed_ledger({"quanta_emission_rate_s": .02, "breathing_flow_m3_s": .001})
+        ledger.scenarios["target"]["role"] = "calibration"
         review = {"admit": False, "reason": "No activity-specific evidence yet", "limitations": []}
         result = calculate(ledger, action="calibrate_infectiousness", operator="cq_from_emission", review=review)
         self.assertEqual(result.facts[0].value, 20)
@@ -59,8 +73,7 @@ class CalculationSupportTests(unittest.TestCase):
         ledger = guessed_ledger({"floor_area_m2": 40, "room_height_m": 2.5, "removal_rate_s": .002})
         first = calculate(ledger)
         ledger.merge(first)
-        keys = [k for k, f in ledger.options().items() if f.field in {"room_volume_m3", "removal_capacity_m3_s"}]
-        result = calculate(ledger, facts=keys, metrics=["concentration_relaxation_time_s"],
+        result = calculate(ledger, metrics=["concentration_relaxation_time_s"],
                            conditions={"well_mixed": "Unreviewed synthetic condition"})
         self.assertEqual(result.estimates[0]["metrics"]["concentration_relaxation_time_s"]["value"], 500)
         self.assertEqual(set(result.calculations[0]["assumption_versions"]), set(ledger.assumptions))
@@ -83,16 +96,19 @@ class CalculationSupportTests(unittest.TestCase):
         self.assertEqual(result.estimates[0]["reasonableness"], 0)
         self.assertTrue(result.estimates[0]["support_issues"])
 
-    def test_historical_derived_value_can_be_examined_but_not_reauthenticated(self):
+    def test_historical_derived_value_is_not_reused_by_main_table_binding(self):
         ledger = guessed_ledger({"floor_area_m2": 40, "room_height_m": 2.5, "removal_rate_s": .002})
-        ledger.merge(calculate(ledger))
+        original = calculate(ledger)
+        ledger.merge(original)
         key = next(iter(ledger.assumptions))
         ledger.assumptions[key] = {**ledger.assumptions[key], "version": "new-judgment",
                                    "statement": "Revised synthetic scope"}
-        selected = [k for k, f in ledger.options().items() if f.field in {"room_volume_m3", "removal_capacity_m3_s"}]
-        result = calculate(ledger, facts=selected, metrics=["removal_rate_s"])
+        result = calculate(ledger, metrics=["removal_rate_s"])
         self.assertEqual(result.estimates[0]["metrics"]["removal_rate_s"]["value"], .002)
-        self.assertTrue(any("changed assumption" in issue for issue in result.calculations[0]["support_issues"]))
+        self.assertFalse({fact.key for fact in original.facts}
+                         & set(result.calculations[0]["input_fact_keys"]))
+        from episodic_workflow.case_reports.research.calculation_steps import calculation_is_up_to_date
+        self.assertFalse(calculation_is_up_to_date(original.calculations[0], "room_volume_m3", ledger))
 
     def test_no_gate_in_actual_method_loop_and_results_return_to_investigation(self):
         base = AdaptiveAgent()
@@ -114,7 +130,6 @@ class CalculationSupportTests(unittest.TestCase):
                             "focus": ["mouth_area_m2"], "subjects": ["target"], "child_model_calls": 2}
                 return {"action": "calculate_transmission_metrics" if "indoor_reproductive_number" not in calculated else "calculate_conditional_limits",
                     "objective": "Examine explicit guesses", "subject": "target", "basis": "Unjustified synthetic parameterization",
-                    "facts": [k for k, a in request["assumption_options"].items() if a["value"] is not None],
                     "conditions": {a["field"]: a["statement"] for a in request["assumption_options"].values() if a["value"] is None}}
             if request["operation"] == "propose_investigation_strategy" and request["context"]["calculated_model_behavior"]:
                 investigated_again = True
@@ -170,7 +185,7 @@ class CalculationSupportTests(unittest.TestCase):
         unavailable = {"admit": False, "completed": False, "reason": "Synthetic unavailable reviewer"}
         ledger.merge(calculate(ledger, metrics=["removal_rate_s"], review=unavailable))
         self.assertEqual(len(ledger.estimates), 2)
-        self.assertEqual([current_support(e, ledger.assumptions) for e in ledger.estimates.values()], [1, 0])
+        self.assertEqual([current_support(e, ledger.assumptions, ledger=ledger) for e in ledger.estimates.values()], [1, 0])
         self.assertEqual(first.estimates[0]["metrics"]["removal_rate_s"]["value"], .002)
         support, issues, invalidated = support_for(ledger, first.facts, {}, "target")
         self.assertEqual(set(support), set(ledger.assumptions))

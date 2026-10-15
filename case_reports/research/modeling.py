@@ -60,21 +60,36 @@ def calibrate_cq_from_outbreak(values, *, transient):
     return -math.log1p(-attack) / factor
 
 
-def select_facts(action, options):
-    keys = action.get("facts")
+def source_calculation_inputs(action, ledger):
+    """Resolve cited native records for a registered source/calibration event."""
+    from .records import numeric_references
+
+    subject = action.get("subject")
+    scenario = ledger.scenarios.get(subject)
+    if scenario is None or scenario.get("role", "target") == "target":
+        raise ValueError("Source input references require a registered source/calibration scenario")
+    if "facts" in action:
+        raise ValueError("The facts selection interface has been removed")
+    keys = action.get("source_inputs")
     if not isinstance(keys, list) or not keys or any(not isinstance(k, str) for k in keys):
-        raise ValueError("facts must be a nonempty list of numeric option references")
-    invalid = [key for key in keys if key not in options]
+        raise ValueError("Source calculations require source_inputs containing the supplied local native-input references")
+    records = numeric_references(ledger)
+    invalid = [key for key in keys if key not in records]
     if invalid:
-        raise ValueError(f"Unknown or non-numeric facts references: {invalid!r}. "
-                         "Select numeric references from calculation_inputs.numeric_options; "
-                         "condition hypotheses belong in conditions as field-to-statement entries, not in facts.")
-    facts = tuple(options[k] for k in keys)
+        raise ValueError(f"Unknown numeric source records: {invalid!r}")
+    facts = tuple(records[k] for k in keys)
+    if action.get("operator") == "transfer_parameter":
+        if any(fact.subject in ledger.scenarios
+               and ledger.scenarios[fact.subject].get("role", "target") == "target"
+               for fact in facts):
+            raise ValueError("Source transfer cannot select target inputs")
+    elif any(fact.subject != subject for fact in facts):
+        raise ValueError("Source calculation inputs must belong to the registered source scenario")
     if len({f.field for f in facts}) != len(facts):
         duplicates = {field: [key for key, fact in zip(keys, facts) if fact.field == field]
                       for field in {f.field for f in facts}
                       if sum(f.field == field for f in facts) > 1}
-        raise ValueError(f"Select one numeric option per field; repeated fields: {duplicates!r}")
+        raise ValueError(f"Source calculation contains repeated numeric fields: {duplicates!r}")
     return facts
 
 
@@ -82,20 +97,18 @@ def review_model(agent, action, facts, context):
     basis = action.get("basis")
     if not isinstance(basis, str) or not basis.strip():
         raise ValueError("Every parameterization requires a named rationale")
-    references = action.get("facts", [action.get("observation")])
-    bindings = {fact.field: {"option_reference": reference,
-                            **{k: v for k, v in fact.semantic_record().items()
-                               if k in {"subject", "value", "unit", "kind"}}}
-                for reference, fact in zip(references, facts)}
+    bindings = {fact.field: {k: v for k, v in fact.semantic_record().items()
+                            if k in {"subject", "value", "unit", "kind"}}
+                for fact in facts}
     review = agent({
         "operation": "review_research_model", "proposal": action,
         "facts": [f.semantic_record() for f in facts], "context": context,
         "resolved_numeric_inputs": bindings,
         "selected_condition_statements": action.get("conditions", {}),
         "instruction": (
-            "resolved_numeric_inputs maps the actual selected references to their canonical fields, "
-            "values, units and subjects. Use this binding to establish which inputs are present; "
-            "do not infer missing fields from opaque reference names or their order. The facts list "
+            "resolved_numeric_inputs gives the actual calculation inputs and their canonical fields, "
+            "values, units and subjects. Target inputs are supplied automatically from the current main table. "
+            "Use these bindings to establish which inputs are present. The facts list "
             "retains their provenance. Distinguish absent required inputs from present inputs with "
             "weak evidence or disputed applicability. "
             "Check scientific compatibility independently. Reject mixed events, ungrounded transfer "
@@ -130,11 +143,10 @@ def review_model(agent, action, facts, context):
     return review
 
 
-def derive_parameter(agent, action, options, context):
+def derive_parameter(agent, action, facts, context):
     operator = action.get("operator")
     if operator not in DERIVATIONS:
         raise ValueError("Unknown derivation; arbitrary model code is not executed")
-    facts = select_facts(action, options)
     subject = action.get("subject")
     if not isinstance(subject, str) or not subject.strip():
         raise ValueError("A derived parameter needs a subject")
@@ -170,8 +182,7 @@ def derive_parameter(agent, action, options, context):
         "An outbreak inversion is calibration, not independent validation.", *review.get("limitations", [])))
 
 
-def evaluate_model(agent, action, options, context, metrics, *, assumptions=()):
-    facts = select_facts(action, options)
+def evaluate_model(agent, action, facts, context, metrics, *, assumptions=()):
     subject = action.get("subject")
     if {f.subject for f in facts} != {subject}:
         raise ValueError("All scenario inputs must belong to this subject; transfer must be explicit")

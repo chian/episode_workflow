@@ -11,7 +11,7 @@ from episodic_workflow.case_reports.research.scenario_sharing import (
     independent_groups, initialize_parameter_scope,
 )
 from episodic_workflow.case_reports.research.scenarios import initial_scenarios, load_scenarios
-from episodic_workflow.case_reports.research.tools import input_options, support_for
+from episodic_workflow.case_reports.research.tools import main_calculation_inputs, support_for
 from episodic_workflow.task_executors.scenario_metrics.evaluate import DEFAULT_METRICS, UNITS
 
 
@@ -64,12 +64,12 @@ class ScenarioSharingTests(unittest.TestCase):
         self.assertEqual(after["target_assumptions"], {"fulfilled": 1, "required": 2})
         self.assertGreater(after["weighted_score"], before["weighted_score"])
         self.assertEqual(len([a for a in ledger.assumptions.values() if a["field"] == self.field]), 1)
-        shared = next(fact for fact in input_options(ledger).values()
+        shared = next(fact for fact in main_calculation_inputs(ledger, "case-beta")
                       if fact.subject == "case-beta" and fact.field == self.field)
         support, issues, invalidated = support_for(ledger, (shared,), {}, "case-beta")
         self.assertEqual((set(support), issues, invalidated), ({"reviewed-value"}, [], []))
         self.assertFalse(any(f.subject == "case-gamma" and f.field == self.field
-                             for f in input_options(ledger).values()))
+                             for f in main_calculation_inputs(ledger, "case-gamma")))
         premise = {"assumption_versions": {self.assumption["key"]: self.assumption["version"]},
             "scenario_parameter_links": [{"assumption_key": self.assumption["key"],
                 "relation_version": shared.parents[1], "target_subject": "case-beta"}]}
@@ -78,7 +78,7 @@ class ScenarioSharingTests(unittest.TestCase):
         ledger.merge(ResearchResult(scenarios=(changed,)))
         self.assertFalse(current_premises(premise, ledger.assumptions, ledger=ledger))
         self.assertFalse(any(f.subject == "case-beta" and f.field == self.field
-                             for f in input_options(ledger).values()))
+                             for f in main_calculation_inputs(ledger, "case-beta")))
 
     def test_dependency_signature_is_transitive_across_multiple_irrelevant_changes(self):
         def assessor(request):

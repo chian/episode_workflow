@@ -16,8 +16,13 @@ def provenance_index(result):
     for assessment in result.assumptions:
         evidence = cited_assessment_evidence(assessment)
         records.update((identity(row), row) for row in evidence.values())
+        # A transferred calculation keeps its numerical ancestry even before a
+        # support review cites evidence. This link does not establish support.
         records[assessment["key"]] = {**assessment, "kind": "model_assumption",
-            "parents": [identity(row) for row in evidence.values()]}
+            "parents": list(dict.fromkeys([
+                *assessment.get("derivation", {}).get("input_fact_keys", ()),
+                *(identity(row) for row in evidence.values()),
+            ]))}
     return records
 
 

@@ -8,24 +8,28 @@ from .records import identity
 
 
 def needed_fields(scenario):
-    from ...task_executors.scenario_metrics.dependencies import fixed_input_fields, input_fields
+    from ...task_executors.scenario_metrics.dependencies import (
+        CALCULATED_PARAMETER_FIELDS, fixed_input_fields, input_fields,
+    )
     from ...task_executors.scenario_metrics.evaluate import DEFAULT_METRICS, UNITS
+    from .model_defaults import retained_defaults
 
     declared = set(scenario.get("assumption_needs", ()))
-    fixed = scenario.get("fixed_parameters", {})
+    fixed = {**retained_defaults(scenario), **scenario.get("fixed_parameters", {})}
     conditions = scenario.get("fixed_conditions", {})
     outputs = tuple(scenario.get("output_contracts", {})) or DEFAULT_METRICS
     dependencies = input_fields(outputs, parameters=UNITS,
         fixed_values={field: row["value"] for field, row in fixed.items()},
         fixed_conditions=conditions)
     return ((declared | (dependencies & UNITS.keys())) - fixed_input_fields(fixed, conditions) - conditions.keys()
-            - set(outputs) - set(scenario.get("calculation_variables", ())))
+            - set(outputs) - set(scenario.get("calculation_variables", ()))
+            - CALCULATED_PARAMETER_FIELDS)
 
 
 def scenario_version(scenario):
     return identity({name: scenario.get(name) for name in
         ("subject", "description", "fixed_parameters", "fixed_conditions", "assumption_needs",
-         "calculation_variables", "output_contracts")})
+          "calculation_variables", "output_contracts", "model_defaults")})
 
 
 def _fixed_features(scenarios):
@@ -124,10 +128,13 @@ def initialize_parameter_scope(initial, assessor=None, *, disease=None):
 def independent_groups(ledger):
     """Current groups only; changed scenarios lose old scope decisions."""
     groups = []
+    needs = {subject: needed_fields(scenario) for subject, scenario in ledger.scenarios.items()
+             if scenario.get("role", "target") == "target"}
     for row in ledger.scenario_parameter_relations.values():
         if row.get("kind") != "group":
             continue
-        if all(subject in ledger.scenarios and row["scenario_versions"].get(subject) ==
+        if all(subject in needs and row["parameter"] in needs[subject]
+               and row["scenario_versions"].get(subject) ==
                scenario_version(ledger.scenarios[subject]) for subject in row["subjects"]):
             groups.append(row)
     covered = {(subject, row["parameter"]) for row in groups for subject in row["subjects"]}
@@ -162,7 +169,8 @@ def shared_assumptions(ledger, subject):
         for assumption in ledger.assumptions.values():
             if (assumption["subject"] == subject or assumption["subject"] not in group["subjects"]
                     or assumption["field"] != group["parameter"] or assumption["value"] is None
-                    or assumption.get("review", {}).get("verdict") in {"contradicted", "fixed_condition"}):
+                    or assumption.get("source_candidate_unavailable")
+                    or assumption.get("review", {}).get("verdict") == "fixed_condition"):
                 continue
             origin = ledger.scenarios.get(assumption["subject"])
             if not origin:
@@ -178,5 +186,18 @@ def shared_assumptions(ledger, subject):
 
 
 def applicable_assumptions(ledger, subject):
-    direct = [(a, None) for a in ledger.assumptions.values() if a["subject"] == subject]
+    from .model_defaults import retained_defaults
+    retained = retained_defaults(ledger.scenarios.get(subject, {}))
+    direct = []
+    for assumption in ledger.assumptions.values():
+        if assumption["subject"] != subject:
+            continue
+        if assumption.get("role") == "model_default":
+            current = retained.get(assumption["field"])
+            if (current is None or assumption.get("value") != current["value"]
+                    or assumption.get("unit") != current["unit"]
+                    or assumption.get("default_decision") != {
+                        name: current[name] for name in ("decision", "reason", "scenario_evidence")}):
+                continue
+        direct.append((assumption, None))
     return (*direct, *shared_assumptions(ledger, subject))

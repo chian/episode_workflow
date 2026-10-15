@@ -9,14 +9,16 @@ from ...task_executors.scenario_metrics.dependencies import input_fields
 from ...task_executors.scenario_metrics.evaluate import CONDITIONS, DEFAULT_METRICS, UNITS
 from .acquisition import StrategySource
 from .admission import extract_and_admit
-from .assumptions import RUBRIC, assess_assumption, assumption_candidate, candidate_response_schema, frame_scenario, text, unassessed_assumption
+from .assumptions import (RUBRIC, assess_registered_candidates, assumption_candidate,
+                          candidate_response_schema, frame_scenario, register_candidate, text)
 from .engine import CONSISTENCY, ResearchLimits, ResearchProviders, ResearchRun, ResearchSource, selected_choice
 from .goal_state import GLOBAL_GOAL_PROGRESS
-from .modeling import DERIVATIONS, review_model, select_facts
-from .records import Ledger, ResearchResult, assumption_model_view, evidence_summary, identity
+from .modeling import DERIVATIONS, review_model
+from .model_defaults import MODEL_DEFAULTS, initialize_model_defaults
+from .records import Ledger, ResearchResult, assumption_model_view, evidence_summary, identity, numeric_references
 from .report import ResearchReport, scientific_progress
 from .scenarios import initial_scenarios, load_scenarios
-from .tools import TOOLS, TOOL_METRICS, bind_reference_inputs, execute_tool, input_options, tool_options
+from .tools import TOOLS, TOOL_METRICS, resolve_calculation_inputs, execute_tool, tool_options
 from .verification import CALIBRATION_PROGRESS
 
 
@@ -30,6 +32,13 @@ OBJECTIVE = (
     "Resolve uncertainty through evidence for assumptions, not comparison or matching to published "
     "answers. A jet/background concentration crossover is not the requested safe distance."
 )
+
+
+def investigable_parameters(ledger, focus):
+    """Retained physical baselines are supplied, not new investigation assignments."""
+    from .scenario_sharing import needed_fields
+    needed = set().union(*(needed_fields(scenario) for scenario in ledger.scenarios.values()))
+    return (set(focus) & (UNITS.keys() | CONDITIONS.keys())) - (MODEL_DEFAULTS.keys() - needed)
 
 
 def admit_scopes(run, proposal, inherited, context):
@@ -59,19 +68,47 @@ def calibration_subjects(ledger):
     return sorted(observed - ledger.scenarios.keys())
 
 
+def source_calculation_view(ledger):
+    """Native operands are exposed only for source/calibration calculations."""
+    records = [{"reference": key, **{name: getattr(fact, name)
+                for name in ("subject", "field", "value", "unit", "kind")}}
+               for key, fact in numeric_references(ledger).items()
+               if fact.subject not in ledger.scenarios
+               or ledger.scenarios[fact.subject].get("role", "target") != "target"]
+    return {"native_input_records": records,
+            "contract": "Source/calibration calculations select source_inputs references for their actual source subject. Target calculations omit numeric references and automatically use the main table, fixed inputs and retained defaults."}
+
+
 def calculation_leaf(source, proposal, staged, context):
     """One reviewed deterministic-tool path for root and hypothesis owners."""
     action = proposal["action"]
 
     def calculate():
-        calculation_action = bind_reference_inputs(proposal, staged, source.run.metrics)
+        from .assumptions import assess_selected_source_candidates
+
         if action == "compare_predictions_with_observations":
+            calculation_action = proposal
             observation = proposal.get("observation")
             if observation not in staged.options():
                 raise ValueError("Comparison requires an admitted observation option")
             facts = (staged.options()[observation],)
         else:
-            facts = select_facts(calculation_action, input_options(staged))
+            calculation_action, facts = resolve_calculation_inputs(proposal, staged, source.run.metrics)
+        source_input_keys = None
+        if calculation_action.get("source_inputs"):
+            references = numeric_references(staged)
+            source_input_keys = [references[ref].key for ref in calculation_action["source_inputs"]]
+        staged.merge(assess_selected_source_candidates(source.run.complete, staged, facts,
+            calculation_action.get("conditions", {}), calculation_action.get("subject"),
+            context, source.failure_result))
+        if action != "compare_predictions_with_observations":
+            if source_input_keys is not None:
+                # Review can persist an inferred operand and shift local labels.
+                # Preserve the source operands already chosen, not their positions.
+                references = {fact.key: ref for ref, fact in numeric_references(staged).items()}
+                calculation_action = {**calculation_action,
+                    "source_inputs": [references[key] for key in source_input_keys]}
+            calculation_action, facts = resolve_calculation_inputs(calculation_action, staged, source.run.metrics)
         model_context = {**context, "calculation_options": tool_options(staged)}
         review_failure = None
         try:
@@ -102,7 +139,9 @@ class GuidelineSource(ResearchSource):
         actions = ["investigate", *self.run.tools] if actions is None else actions
         focus = self.focus if focus is None else focus
         prose = {"type": "string", "minLength": 1}
-        options = input_options(ledger)
+        options = {key: fact for key, fact in numeric_references(ledger).items()
+                   if fact.subject not in ledger.scenarios
+                   or ledger.scenarios[fact.subject].get("role", "target") != "target"}
         def strings(description, choices=None, minimum=0):
             item = prose if choices is None else ({"type": "string", "enum": list(choices)} if choices else False)
             return {"type": "array", "minItems": minimum, "uniqueItems": True,
@@ -111,8 +150,8 @@ class GuidelineSource(ResearchSource):
             "properties": {
                 "action": {"type": "string", "enum": actions},
                 "objective": {**prose, "description": "Required information need for an investigation child; optional for a calculation whose rationale belongs in basis"},
-                "parameter": {"type": "string", "enum": sorted(set(focus) & (UNITS.keys() | CONDITIONS.keys())),
-                    "description": "For investigation: the calculation parameter or model condition this branch serves. Its scoring scope is fixed by executable dependencies, not by search wording."},
+                "parameter": {"type": "string", "enum": sorted(investigable_parameters(ledger, focus)),
+                    "description": "For investigation: the calculation parameter or model condition this branch serves. Shared credit tracks all independent target values and calculation steps."},
                 "deliverable": {"type": "string", "enum": ["source_findings", "assumption_hypotheses"],
                     "description": "For investigation: source_findings requests observations, bounds or applicability evidence; assumption_hypotheses requests recorded, independently assessed parameter or condition hypotheses for the named subjects."},
                 "subjects": strings("Existing or newly proposed scenario names whose uncertainty the investigation should resolve"),
@@ -122,12 +161,12 @@ class GuidelineSource(ResearchSource):
                         "basis": {**prose, "description": "Alignment with the original request"},
                         "role": {"type": "string", "enum": ["target", "calibration", "validation"]}}}},
                 "subject": {**prose, "description": "Reviewed scenario for the selected tool"},
-                "facts": strings("Select references from calculation_inputs.numeric_options only, one value per field; condition statements belong in conditions, never facts",
+                "source_inputs": strings("For a source/calibration calculation only: native_input_records references, one value per field. Omit for target calculations, whose inputs bind automatically.",
                                  options, minimum=1),
                 "conditions": {"type": "object", "additionalProperties": False,
                     "properties": {name: {**prose, "description": "Named condition hypothesis, including unassessed conditions; reuse an assessed statement exactly when that is the intended assumption"} for name in CONDITIONS}},
                 "basis": {**prose, "description": "Named parameterization or comparison rationale"},
-                "parameterization": {**prose, "description": "Stable model-alternative name, reused across tools sharing assumptions"},
+                "parameterization": {**prose, "description": "Stable physical-model name, reused across tools; it never overrides main-table numeric inputs"},
                 "metrics": strings("Omit to use this tool's requested outputs, or choose only names permitted by its action-specific schema below. Geometry-derived input parameters are emitted automatically, not selected here.",
                                    sorted(set(METRICS) | {"removal_rate_s"})),
                 "operator": {"type": "string", "enum": list(DERIVATIONS)},
@@ -138,7 +177,7 @@ class GuidelineSource(ResearchSource):
                 {"if": {"properties": {"action": {"const": "investigate"}}},
                  "then": {"required": ["objective", "subjects", "deliverable", "parameter"]}},
                 {"if": {"properties": {"action": {"enum": [name for name in TOOLS if name != "compare_predictions_with_observations"]}}},
-                 "then": {"required": ["subject", "facts", "basis"]}},
+                 "then": {"required": ["subject", "basis"]}},
                 {"if": {"properties": {"action": {"const": "calibrate_infectiousness"}}},
                  "then": {"required": ["operator"]}},
                 {"if": {"properties": {"action": {"const": "compare_predictions_with_observations"}}},
@@ -148,16 +187,26 @@ class GuidelineSource(ResearchSource):
                        sorted(choices), minimum=0 if tool == "calculate_geometry_and_removal" else 1)}}}
                   for tool, choices in TOOL_METRICS.items()),
             ]}
+        from .scenario_sharing import needed_fields
+        for field in MODEL_DEFAULTS:
+            eligible = [subject for subject, definition in ledger.scenarios.items()
+                        if field in needed_fields(definition)]
+            schema["allOf"].append({
+                "if": {"required": ["action", "parameter"], "properties": {
+                    "action": {"const": "investigate"}, "parameter": {"const": field}}},
+                "then": {"properties": {"subjects": strings(
+                    "Only cases whose upfront constants review promoted this physical property", eligible)}}})
         if self.run.fixed_scenarios:
             properties = schema["properties"]
             for name in ("prediction", "observation", "metric"):
                 properties.pop(name)
             events = calibration_subjects(ledger)
             scopes = [*ledger.scenarios, *events]
-            properties["scenarios"]["description"] = "Only register a distinct calibration event already identified by admitted observations. Never redefine target cases."
+            properties["scenarios"]["description"] = "Register an unregistered event identified by admitted observations as role=calibration, using its exact source subject. Include this declaration in the same proposal as a calculation for that event; scope review runs before calculation. Existing scenarios need no declaration. Target cases remain fixed."
             properties["scenarios"]["items"]["properties"]["role"] = {"const": "calibration"}
             properties["scenarios"]["items"]["properties"]["subject"] = {"enum": events} if events else False
-            properties["subject"] = {"type": "string", "enum": scopes}
+            properties["subject"] = {"type": "string", "enum": scopes,
+                "description": "Exact registered scenario subject, or an observed event registered in this proposal's scenarios. Except for transfer_parameter, every selected numeric input must have this exact subject; event aliases are not interchangeable."}
             properties["subjects"] = strings("Existing cases or observed calibration events registered in this proposal",
                                             scopes)
             properties["basis"]["description"] = "Named conditional parameterization and its rationale"
@@ -167,11 +216,21 @@ class GuidelineSource(ResearchSource):
                 "if": {"required": ["subject"], "properties": {"subject": {"const": subject}},
                        "not": {"required": ["operator"], "properties": {"operator": {"const": "transfer_parameter"}}}},
                 "then": {"properties": {
-                    "facts": strings("Inputs belonging to this selected case; cross-case transfer must be explicit",
+                    "source_inputs": strings("Native operands belonging to this source/calibration case",
                                      [key for key, fact in options.items() if fact.subject == subject], minimum=1),
                     "conditions": {"properties": {name: {"const": statement}
                         for name, statement in definition.get("fixed_conditions", {}).items()}}}}}
                 for subject, definition in ledger.scenarios.items())
+        target_subjects = [subject for subject, definition in ledger.scenarios.items()
+                           if definition.get("role", "target") == "target"]
+        schema["allOf"].append({
+            "if": {"required": ["subject"], "properties": {"subject": {"enum": target_subjects}}},
+            "then": {"properties": {"source_inputs": False,
+                "operator": {"type": "string", "enum": [name for name in DERIVATIONS
+                                                         if name != "transfer_parameter"]}}},
+            "else": {"if": {"required": ["action"], "properties": {
+                "action": {"enum": [name for name in TOOLS if name != "compare_predictions_with_observations"]}}},
+                "then": {"required": ["source_inputs"]}}})
         return schema
 
     def propose(self, view):
@@ -179,23 +238,21 @@ class GuidelineSource(ResearchSource):
         proposal = self.run.agent(self.inputs(view, operation="propose_guideline_action",
             allowed_actions=["investigate", *self.run.tools], tools=self.run.tools,
             assumption_options={key: value for key, value in assumptions.items() if value["value"] is not None},
-            calculation_inputs={
-                "numeric_options": {key: {name: value for name, value in fact.semantic_record().items()
-                                          if name in {"subject", "field", "value", "unit", "kind"}}
-                                    for key, fact in input_options(self.ledger).items()},
-                "condition_hypotheses": [value for value in assumptions.values() if value["value"] is None],
-                "selection_contract": "facts selects numeric_options references. conditions maps canonical condition fields to their statement text; condition hypotheses are not numeric options.",
-            },
+            source_calculation_inputs=source_calculation_view(self.ledger),
+            condition_hypotheses=[value for value in assumptions.values() if value["value"] is None],
             metric_catalog={k: metric_catalog_record(k) for k in METRICS},
             canonical_fields=UNITS, model_conditions=CONDITIONS, derivations=DERIVATIONS,
             calculations=tool_options(self.ledger),
-            scientific_progress=scientific_progress(self.ledger.result(), self.run.metrics),
+            scientific_progress=scientific_progress(self.ledger.result(), self.run.metrics, decision_view=True),
             instruction=(
                 "Choose one useful action toward the original request, informed by prior results. "
                 "At each root decision, try a requested calculation as soon as selected numeric "
                 "facts or recorded hypotheses and physically applicable conditions make it executable. "
+                "Also consider a ready intermediate calculation in calculation_steps; it can advance "
+                "the requested outputs before all their inputs are found. Geometry with metrics=[] "
+                "computes available derived inputs from the target main table. "
                 "Prefer a new provisional calculation to another investigation when it would fill a "
-                "missing requested output or expose a consequential sensitivity; weak evidence lowers "
+                "missing requested output using the current main-table inputs; weak evidence lowers "
                 "support, not the value of learning that consequence. If a calculation lacks a specific "
                 "physical input, request a narrowly scoped assumption_hypotheses investigation to "
                 "propose a qualified value, then reconsider calculation when it returns. Do not spend "
@@ -207,17 +264,23 @@ class GuidelineSource(ResearchSource):
                 "replace or alter target scenarios. Their fixed_parameters and fixed_conditions define scope, "
                 "not empirical evidence; use the supplied options without reassessing those givens. "
                 "Investigate the remaining assumptions. Read each case's output_contracts. "
-                "Name the calculation parameter served by each investigation in parameter. Its "
-                "existing executable dependencies determine eligible evidence elements; strategies "
-                "cannot add requirements by naming more settings, sources or topics. Search choices "
+                "The upfront constants judge recorded model_defaults before scenario sharing. "
+                "Retained physical baselines are supplied automatically with their conditional "
+                "provenance and earn no discovery credit; do not investigate or reassess them. "
+                "Only defaults explicitly promoted for a case remain parameter needs. "
+                "Name the calculation parameter served by each investigation in parameter. "
+                "Shared credit tracks the predefined independent target values and calculation steps; "
+                "strategies cannot add requirements by naming more settings, sources or topics. Search choices "
                 "remain yours. Credit measures filled parameters and distinct corroboration, not "
                 "completion of a literature survey or a partially answered question. "
                 "The caller's target cases were compared before research and equivalent parameter "
                 "needs were grouped as independent unknowns. A numeric_option shared from another "
-                "case belongs to the selected target's group; select it directly when useful instead "
-                "of requesting a duplicate hypothesis for that group. "
+                "case belongs to the selected target's group and is bound automatically when it is the "
+                "main selected value. Do not request a duplicate hypothesis for that group. "
                 "Give each investigation a specific question and only the context necessary to answer it. "
                 "Name only the target subjects involved; use [] for source discovery without a target assignment. "
+                "An empty subjects list leaves target applicability open; it does not prohibit estimates "
+                "for relevant existing targets or registered source calibration contexts. "
                 "The child contract retains the full caller-defined target set, including fixed inputs "
                 "and conditions, while subjects marks this episode's local investigation. This lets "
                 "source discovery assess applicability across the requested cases even with subjects=[]. "
@@ -227,19 +290,27 @@ class GuidelineSource(ResearchSource):
                 "applicability evidence without a new target hypothesis. Specify assumption_hypotheses "
                 "when you need recorded parameter values or condition hypotheses and their independent "
                 "reasonableness assessments. Evidence discovery and hypothesis justification have "
-                "different completion contracts; neither is an instruction to execute your tools. "
+                "different information contracts; either child may form a useful conditional estimate "
+                "or execute an available calculation. Useful target-value changes return control at an "
+                "ordinary episode boundary so you can reconsider the whole target table. "
                 "An evidence-based outbreak calibration is also required. Acquire observed outbreak counts, "
                 "duration and context through investigate's search children. Source observations "
                 "retain their actual event subject. Register a separate calibration context in scenarios "
                 "using that exact admitted subject and role=calibration; this does not add a target case. "
                 "Investigate missing event assumptions, then use calibrate_infectiousness with "
                 "cq_from_steady_outbreak or cq_from_transient_outbreak. That tool contains the "
-                "calibrate_cq_from_outbreak subtask. Carry its derived Cq through explicit transfer_parameter "
-                "and, where justified, cq_activity_rescaling to the target; select the derived facts in "
-                "subsequent calculations so calibration lineage is retained. Assess transfer compatibility, "
+                "calibrate_cq_from_outbreak subtask. Eligible derived source Cq automatically enters "
+                "matching target alternatives with its calculation lineage and value-specific relevance. "
+                "Subsequent target calculations bind the main selected value automatically; a second transfer proposal "
+                "is not required. Use cq_activity_rescaling only when an explicit activity adjustment "
+                "is justified by its inputs. Assess transfer compatibility, "
                 "including the runtime disease/variant and activity, without double scaling. A source's "
                 "published Cq is not an outbreak inversion performed by this workflow. "
-                "Provisional calculations can proceed before calibration, but do not complete that requirement. "
+                "An emission-to-breathing quotient is also a usable conditional estimate, but is not an "
+                "independent outbreak inversion. Missing calibration does not block found target values, "
+                "bounded best guesses or provisional target calculations. Pursue that remaining calibration "
+                "requirement alongside other missing inputs; do not make a broad outbreak search a "
+                "prerequisite to filling or calculating the target table. "
                 "scientific_progress.targets reports calibration_linkage for each parameterization. "
                 "A supported solution and a calibrated solution in different parameterizations do not "
                 "complete the goal. Performing an inversion is distinct from using its derived value "
@@ -252,8 +323,8 @@ class GuidelineSource(ResearchSource):
                 "FIX BOTH exposure_time_s and neighbor_distance_m. All three operations use the "
                 "same risk model and assumptions within a background regime. Background-only legacy "
                 "outputs and the concentration crossover do not substitute for these requested answers. "
-                "The tool binds caller-supplied reference inputs before model review and execution; "
-                "it does not choose scientific assumptions. These reference inputs are not the "
+                "Before model review and execution, the tool binds caller-supplied reference inputs, "
+                "retained defaults and the authoritative main-table scientific values. These reference inputs are not the "
                 "unknown being solved for and are not discoveries to research or reassess. Never "
                 "copy the reference separation as a calculated safe distance or replace it with "
                 "random spacing. Omitted target-case reference inputs are filled by the scenario "
@@ -268,13 +339,24 @@ class GuidelineSource(ResearchSource):
                 "Reference existing subjects without "
                 "redeclaring or paraphrasing their definitions. "
                 "Investigate unresolved assumptions, conflicting evidence, or prediction discrepancies. "
-                "Calculations select existing fact options or numeric assumption options, including "
-                "unsupported guesses; use named condition statements. calculation_inputs separates "
-                "numeric references from condition hypotheses. Never place a condition reference in facts. "
-                "Numeric hypotheses originate in "
-                "investigate, not as hidden literals in a tool call. Evidence quality affects credit and "
-                "conclusion support, not permission to compute. Calculating a guess can reveal sensitivity "
-                "or a discrepancy without validating it. Recalculate when input values or model claims change. "
+                "Target calculations take the target subject, tool, requested metrics and named condition "
+                "statements. They automatically use the main table, including unsupported main values; "
+                "do not supply facts or select numeric alternatives. Source/calibration calculations "
+                "retain their own native operands through source_calculation_inputs. "
+                "Native source values and eligible source calculations automatically create target input alternatives. The main table "
+                "selects the alternative with the highest source-scenario relevance for that value and "
+                "parameter; every target calculation binds that value. Low or unknown relevance does not block "
+                "a found value or its discovery credit. Additional inferred hypotheses originate in "
+                "investigate, not as hidden literals in a tool call. Evidence quality qualifies "
+                "conclusion support. Calculating the main estimate can expose a discrepancy without validating it. "
+                "Recalculate when main values or model claims change. Competing numeric candidates remain "
+                "in the evidence history and may become the main value through relevance ranking; they "
+                "cannot be selected separately for a target calculation. "
+                "Inspect global_scientific_goal.calculation_steps, including each row's value, units, "
+                "status, credit, ready_to_calculate and ready_to_recalculate flags. Changed "
+                "dependencies remove current-result credit; retained method credit records only prior "
+                "successful work, not present applicability. At each ordinary decision, "
+                "consider a useful ready recalculation alongside other ways to advance the Goal. "
                 "Develop provisional numerical results and iteratively strengthen their assumptions or "
                 "revise their consequences. Numerical coverage and evidential support are concurrent needs, "
                 "not phases where every missing output must be filled before any weak result is revisited. "
@@ -325,9 +407,8 @@ class GuidelineSource(ResearchSource):
                 "the requester can supply: the investigation branch may propose and justify bounded "
                 "assumptions where appropriate. Such choices are neither universal defaults nor facts "
                 "about an unspecified real room. Preserve all requested outputs and case constraints. "
-                "General applicability does not mean one universal set of parameter values. Named "
-                "conditional parameterizations can instantiate a target scope, with every numerical "
-                "choice given a rationale and its current support distinguished from requester givens "
+                "General applicability does not mean one universal set of parameter values. Each target "
+                "uses its own main-table values with their rationale and current support distinguished from requester givens "
                 "and source observations. Missing justification remains a research need, not an execution gate. "
                 "scientific_progress separates computed quantities, evidence-supported quantities and "
                 "coherent parameterization coverage, using the same projection as closure. Its figures "
@@ -365,13 +446,17 @@ class GuidelineSource(ResearchSource):
         staged.merge(self.request_evidence)
         if action == "investigate":
             parameter = selected_choice(proposal.get("parameter"),
-                set(self.focus) & (UNITS.keys() | CONDITIONS.keys()), "parameter")
+                investigable_parameters(staged, self.focus), "parameter")
             deliverable = selected_choice(proposal.get("deliverable"),
                 ("source_findings", "assumption_hypotheses"), "deliverable")
             source = InvestigationSource(self.run, staged.result())
             subjects = proposal.get("subjects")
             if not isinstance(subjects, list) or any(s not in staged.scenarios for s in subjects):
                 raise ValueError("Investigation subjects must be reviewed scenarios")
+            if parameter in MODEL_DEFAULTS:
+                from .scenario_sharing import needed_fields
+                if any(parameter not in needed_fields(staged.scenarios[subject]) for subject in subjects):
+                    raise ValueError("A retained or caller-fixed physical baseline is not an investigation need for that case")
             source.credit_subjects = tuple(subjects) or None
             if deliverable == "assumption_hypotheses" and not subjects:
                 raise ValueError("An assumption investigation must name its assigned scenario subjects")
@@ -382,6 +467,7 @@ class GuidelineSource(ResearchSource):
                 "fixed_parameters": targets[name].get("fixed_parameters", {}),
                 "fixed_conditions": targets[name].get("fixed_conditions", {}),
                 "assumption_needs": targets[name].get("assumption_needs", ()),
+                "model_defaults": targets[name].get("model_defaults", {}),
             } for name in targets}
             return self.edge(self.run.child(view, source, "investigate", objective,
                 proposal=proposal, contract=self.contract(
@@ -410,7 +496,25 @@ class InvestigationSource(ResearchSource):
 
     def inference_options(self):
         """Inputs retain native fields; the assignment constrains inferred outputs."""
-        return self.ledger.evidence_options(), input_options(self.ledger)
+        return self.ledger.evidence_options(), numeric_references(self.ledger)
+
+    def hypothesis_scenarios(self, ledger=None, *, include_observed=False):
+        """An open source assignment still permits hypotheses in reviewed scopes."""
+        ledger = self.ledger if ledger is None else ledger
+        if not self.run.fixed_scenarios:
+            return None
+        subjects = set(self.requested_subjects) if self.requested_subjects else {
+            name for name, definition in ledger.scenarios.items()
+            if definition.get("role", "target") == "target"}
+        subjects.update(name for name, definition in ledger.scenarios.items()
+                        if definition.get("role") == "calibration")
+        scenarios = {name: definition for name, definition in ledger.scenarios.items()
+                     if name in subjects}
+        if include_observed:
+            # As with tool subjects, these require a same-proposal declaration
+            # and successful admit_scopes review before runtime validation.
+            scenarios.update((name, {}) for name in calibration_subjects(ledger))
+        return scenarios
 
     def proposal_schema(self):
         prose = {"type": "string", "minLength": 1}
@@ -426,11 +530,15 @@ class InvestigationSource(ResearchSource):
         schema["properties"].update({
             "approach": {**prose, "description": "Evidence strategy and its rationale"},
             "objective": {**prose, "description": "Information this strategy must resolve for the parent"},
-            "candidates": {"type": "array", "description": "Your proposed target-case hypotheses for mandatory assessment. Omit action and supply nonempty candidates to assess in this iteration using accumulated evidence, without another search. With evidence_strategy, assessment follows that child. An empty array proposes no new hypotheses.",
+            "candidates": {"type": "array", "description": "Your hypotheses for eligible target cases or source calibration contexts. An observed event needs a same-proposal calibration declaration and scope review. Omit action and supply nonempty candidates to assess using accumulated evidence, without another search. With evidence_strategy, assessment follows that child. An empty array proposes no new hypotheses.",
                 "items": candidate_response_schema(
-                    scenarios={name: self.ledger.scenarios[name] for name in self.requested_subjects}
-                              if self.run.fixed_scenarios else None, evidence=evidence, numeric_inputs=numeric)},
+                    scenarios=self.hypothesis_scenarios(include_observed=True),
+                    evidence=evidence, numeric_inputs=numeric)},
         })
+        for branch in schema["properties"]["candidates"]["items"]["oneOf"]:
+            fields = branch["properties"]["field"]["enum"]
+            branch["properties"]["field"]["enum"] = [
+                field for field in fields if field in self.parameter_requirements]
         schema["allOf"].append({"if": {"required": ["action"], "properties": {"action": {"const": "evidence_strategy"}}},
                                  "then": {"required": ["approach", "objective", "candidates"]}})
         return schema
@@ -451,24 +559,23 @@ class InvestigationSource(ResearchSource):
                                     for key, fact in numeric.items()},
                 "selection_contract": "Candidate source_refs select these evidence_options; input_refs select these numeric_options. These references identify existing records, not new evidence or permission to relabel a measurement.",
             },
-            calculation_inputs={
-                "numeric_options": {key: {name: value for name, value in fact.semantic_record().items()
-                                          if name in {"subject", "field", "value", "unit", "kind"}}
-                                    for key, fact in input_options(self.ledger).items()},
-                "condition_hypotheses": [value for value in self.ledger.assumption_options().values()
-                                         if value["value"] is None],
-                "selection_contract": "facts selects numeric_options references; conditions maps canonical condition fields to statements.",
-            },
+            source_calculation_inputs=source_calculation_view(self.ledger),
+            condition_hypotheses=[value for value in self.ledger.assumption_options().values()
+                                  if value["value"] is None],
             calculations=tool_options(self.ledger),
             reasonableness_rubric=RUBRIC,
             episode_responsibilities={
                 "this_investigation": "Meet the parent's information contract through assessed hypotheses from accumulated evidence and chosen evidence strategies. When existing inputs permit a requested calculation, execute its deterministic tool here and share that progress with the whole Goal.",
-                "strategy_child": "Acquire and synthesize source evidence relevant to the hypotheses and unresolved question. It cannot propose or admit target-case assumptions for this investigation.",
+                "strategy_child": "Acquire native source values and evidence. Each numeric commit automatically creates matching target alternatives, selects the highest value-specific source relevance, and updates shared credit. Inferred hypotheses remain this investigation's responsibility.",
                 "scientific_parent": "Use shared calculation and evidence progress to select the next investigation or calculation.",
             },
             instruction=(
                 "You are the investigation episode, responsible for connecting source evidence to the "
-                "parent's scientific Goal. Use the information you already have to infer missing "
+                "parent's scientific Goal. Native values and eligible source calculations automatically enter matching independent "
+                "target groups; their highest value-specific source relevance selects the main-table value "
+                "and updates global credit without another proposal or review. Target calculations bind those "
+                "main values automatically. Propose an inferred hypothesis only when inference or another candidate "
+                "is needed. Use the information you already have to infer missing "
                 "parameters: recognize related quantity names, convert units, recast measurements, "
                 "or calculate an estimate from other quantities when the physical reasoning permits it. "
                 "Record each inferred numeric candidate as entry_type=best_guess, with its own "
@@ -480,21 +587,37 @@ class InvestigationSource(ResearchSource):
                 "no new search, tool or child is required. Empty references honestly declare an "
                 "unsupported guess; they do not manufacture evidence. Choose evidence_strategy "
                 "when you need additional evidence, or choose an available calculation tool when selected existing inputs and physically "
-                "applicable conditions can produce a new requested result. A tool choice uses existing "
-                "numeric_options and condition statements; do not put a new hypothesis in tool literals. "
+                "applicable conditions can produce a requested result or a ready intermediate step. "
+                "Geometry with metrics=[] computes available derived inputs from the target main table. "
+                "Choose the target subject, tool, metrics and condition statements; do not supply facts "
+                "or numeric alternatives. Source/calibration tools use source_calculation_inputs for "
+                "their native operands. A new hypothesis must be registered and ranked before it can "
+                "become the main input; it cannot be inserted into a target tool call. "
                 "Prefer a newly executable provisional calculation to another long evidence strategy "
                 "when it advances the shared Goal. A calculation here retains its source and assumption "
-                "lineage and returns to the parent with your other findings. For evidence_strategy, "
+                "lineage and returns to the parent with your other findings. Inspect "
+                "global_scientific_goal.calculation_steps, including each row's value, units, status, "
+                "credit, ready_to_calculate and ready_to_recalculate flags: changed dependencies "
+                "remove current-result credit, while retained method credit records prior successful work, "
+                "not present applicability. Consider useful ready recalculations at the next ordinary "
+                "decision; this does not prescribe an action sequence. For evidence_strategy, "
                 "choose candidate hypotheses and an evidence-acquisition approach "
                 "for this parent's scientific uncertainty. Put hypotheses you propose in this response's "
                 "candidates array. Read the parent's deliverable: source_findings needs source-grounded "
                 "answers, bounds and applicability limits and does not require inventing a target "
-                "hypothesis; assumption_hypotheses needs actual recorded proposals and mandatory "
-                "reasonableness assessment. Under either contract, any hypotheses you choose to propose "
+                "hypothesis; it permits useful conditional estimates and calculations. "
+                "assumption_hypotheses needs recorded values or condition hypotheses. "
+                "An independent outbreak inversion may remain an overall research requirement; it is "
+                "not a prerequisite to filling a target input or calculating a provisional consequence. "
+                "A published input, a derived source estimate and a bounded best guess retain their "
+                "distinct provenance. An emission-to-breathing quotient does not become an independent "
+                "outbreak inversion. Use the available estimate while keeping that limitation explicit. "
+                "Automatic source-value entries already supply numeric alternatives. Inferred hypotheses "
+                "receive mandatory reasonableness assessment. Under either contract, any hypotheses you choose to propose "
                 "must be recorded in the "
                 "candidates array. Asking the strategy child to construct a parameterization, choose "
                 "values or independently assess assumptions does not perform that work: its contract "
-                "returns source evidence, not target-case hypotheses. Mandatory reasonableness review assesses "
+                "extracts source values automatically but does not perform new physical inferences. Mandatory reasonableness review assesses "
                 "only candidates actually recorded by this investigation. "
                 "Admitted source values and ranges can inform your own conditional choices with an "
                 "explicit applicability rationale; they need not already be labeled with the target "
@@ -505,7 +628,7 @@ class InvestigationSource(ResearchSource):
                 "calculation_variables from missing physical inputs. For the latter, reason from available "
                 "ranges, transferable measurements, dimensional constraints or clearly labeled guesses; "
                 "name the applicability premise and what could overturn it. A range can motivate one "
-                "qualified hypothesis or distinct sensitivity hypotheses without constituting a direct "
+                "qualified hypothesis or competing input candidates without constituting a direct "
                 "measurement. Do not defer a whole requested output merely because the source did not "
                 "select a scalar for you. If a proposed approximation would contradict the fixed case "
                 "or the available model, explain that specific conflict rather than inventing a compatible case. "
@@ -514,14 +637,17 @@ class InvestigationSource(ResearchSource):
                 "cannot add a kernel or override its enforced constraints. Distinguish evidence that "
                 "would inform a model extension from an input the parent can calculate with now. "
                 "An empty candidates array is appropriate when this iteration is acquiring information "
-                "without proposing a new hypothesis, but it leaves target inputs unresolved unless "
-                "existing candidates already cover them. "
+                "without proposing a new hypothesis. Check the shared target table: automatically "
+                "extracted values may already have filled the inputs. "
                 "Use previous failures to understand what remains unknown. You may propose or revise "
                 "named candidate assumptions and alternatives, but cannot mark them supported or assign credit. "
                 "A candidate statement describes a physical/scenario claim, not a research instruction or "
                 "a rule to use a model only after evidence is found. For an unchanged claim, preserve its "
-                "existing statement exactly; put new rationale in basis and evidence qualifications in the "
-                "mandatory review. Changing a statement changes claim identity and can invalidate calculations. "
+                "existing statement, basis and added_assumptions exactly. Repeating the same claim and "
+                "identified provenance reuses its completed review; a prose-only rewrite does not replace "
+                "the registered premises. Put a material premise revision in the claim statement or "
+                "identified source/input provenance. New evidence is considered by the review without "
+                "reproposing the unchanged claim. Changing a statement changes claim identity and can invalidate calculations. "
                 "Source extraction and assumption inference have different contracts: extracted "
                 "numeric facts must be printed in a source, whereas a candidate may be an inferred "
                 "conditional value with a named rationale to test against numeric or qualitative "
@@ -530,7 +656,7 @@ class InvestigationSource(ResearchSource):
                 "ingredients, related systems, geometric or physical constraints, and explicit "
                 "approximations. Explain the inference, differences in context and uncertainty. "
                 "A guess can be proposed before justification exists; its assessment and credit must "
-                "reflect that weakness, but the parent can still calculate its consequences. "
+                "reflect that weakness. If selected by relevance as the main value, the parent can calculate its consequences. "
                 "Do not restrict all evidence searches to a reference paper merely because it defines "
                 "the model. Choose the approach from the information needed and prior search outcomes. "
                 "A numeric candidate needs a finite JSON number, not a string or null. If a parameter has "
@@ -538,28 +664,52 @@ class InvestigationSource(ResearchSource):
                 "approach which requested quantity remains unresolved and what reasoning or evidence "
                 "is needed to form a hypothesis; missing direct measurement alone does not prohibit "
                 "an inferred choice. Null is only for nonnumeric model conditions. "
-                "Mandatory assessment follows every candidate-bearing iteration or returned strategy "
-                "and considers accumulated supporting and contrary evidence, including inherited evidence. "
+                "All numeric origins use the same registration, source-relevance grading and main-value selection "
+                "before reasonableness review. Mandatory assessment follows candidate-bearing iterations "
+                "and returned strategies, reusing a completed review when its claim, inputs, evidence "
+                "and scope are unchanged. It considers accumulated supporting and contrary evidence, "
+                "including inherited evidence, and does not gate numeric availability or found credit. "
                 "The system has already compared the selected cases and grouped parameter needs "
                 "that can use one value. Propose one candidate for an independent group; do not "
                 "duplicate it across that group's cases. "
+                "Retained model_defaults were reviewed before grouping and are already supplied "
+                "conditional physical premises. Do not propose or reassess them; only promoted "
+                "default properties appear among the case's remaining parameter needs. "
                 "A candidate is a hypothesis, never reported evidence. When context.fixed_scenarios is true, "
-                "use the caller's existing cases, do not define or alter scenarios, and do not propose their "
-                "fixed_parameters or fixed_conditions as new assumptions. Source evidence retains its actual "
-                "event identity; explain its applicability to the selected target cases. Only an unfixed "
-                "internal task may define additional source/calibration scenarios. No stopping or separate assessment action."
+                "preserve the caller's target cases and their fixed_parameters and fixed_conditions. "
+                "You may register a distinct source event identified by admitted observations as a "
+                "calibration scenario, using its exact source subject and role=calibration. For a "
+                "calculation on an unregistered event, include that scenarios declaration in the same "
+                "proposal as the calculation; scope review runs before execution. Reuse an already "
+                "registered subject without redeclaring it. The calculation subject must exactly match "
+                "the registered scenario and, except for transfer_parameter, every selected numeric "
+                "input's subject. Source-event grouping does not make different subject labels "
+                "interchangeable for calculation. Source evidence retains its actual event identity; "
+                "explain its applicability to the selected target cases. No stopping or separate assessment action."
                 " A scenario is a case or conditional experiment, not an equation or investigation topic."
                 " Every candidate subject must match a reviewed case. Source-event labels alone do not "
                 "establish a scope; source evidence retains its original identity and applicability must "
-                "be assessed for the target. Fixed-mode contracts do not accept scenario definitions. "
+                "be assessed for the target. Fixed-mode scenario registration is limited to these "
+                "source-grounded calibration contexts; the target set remains fixed. "
                 " The parent's information contract and requested subjects are in context. Source or "
                 "calibration subjects can supply evidence, but new templates do not substitute for "
                 "resolving assumptions for the requested subjects. Explain applicability to those subjects. "
-                "Propose hypotheses only for your assigned question and subjects. "
-                "The parent-assigned parameter fixes this branch's scoring scope. Strategies may "
-                "vary, but additional source settings or broader questions are not extra requirements. "
-                "Retain competing parameter values with their evidence and conditions; do not select "
-                "a value by evidence count. Mandatory reasonableness review judges applicability "
+                "Propose hypotheses for your assigned parameter or its executable dependencies, within "
+                "the candidate schema's eligible subjects. With subjects=[], existing target cases remain "
+                "eligible; an empty assignment is not a ban on estimates. Registered source calibration "
+                "contexts are eligible for their own missing operands. Keep source hypotheses on their "
+                "actual source subject and target hypotheses on the target they describe. "
+                "At each decision, inspect independent_target_values for missing inputs and the shared "
+                "calculation_steps for ready work. Prefer a bounded useful estimate or executable "
+                "calculation over another source search that only repeats known caveats. New main-table "
+                "target values or changed selected values can return this episode at the next ordinary "
+                "boundary, letting the parent choose among all remaining parameters; no stop action is needed. "
+                "The parent-assigned parameter guides the question; shared credit covers all predefined "
+                "independent target values and calculation steps. Values for other target parameters "
+                "also count automatically. Additional source settings are not extra requirements. "
+                "Retain competing parameter values with their evidence and conditions. Highest value-specific "
+                "source relevance selects the main value, and only that value feeds target calculations. "
+                "Do not select a different value per calculation or by evidence count. Mandatory reasonableness review judges applicability "
                 "and contradictions. "
                 "Give the strategy child a specific evidence question and the necessary hypothesis "
                 "context in objective, not your whole assignment or a field checklist. Its short "
@@ -571,7 +721,7 @@ class InvestigationSource(ResearchSource):
                   if "action" in proposal else None)
         if action is not None and action != "evidence_strategy":
             if proposal.get("candidates"):
-                raise ValueError("A calculation may select only previously recorded hypotheses")
+                raise ValueError("Register new candidates before calculating; target inputs come from the main table")
             self.staged = admit_scopes(self.run, proposal, self.ledger.result(), self.context())
             context = {**self.context(), "defined_scenarios": dict(self.staged.scenarios)}
             return calculation_leaf(self, proposal, self.staged, context)
@@ -595,11 +745,20 @@ class InvestigationSource(ResearchSource):
         validated = [assumption_candidate(candidate, self.staged) for candidate in candidates]
         if any(c["field"] not in self.parameter_requirements for c in validated):
             raise ValueError("Candidate assumptions must serve the assigned parameter or its executable dependencies")
-        if self.run.fixed_scenarios and any(c["subject"] not in self.requested_subjects for c in validated):
-            raise ValueError("Candidate assumptions must belong to this investigation's assigned subjects")
-        changed_candidates = [candidate for candidate in validated
+        eligible = self.hypothesis_scenarios(self.staged)
+        if eligible is not None and any(c["subject"] not in eligible for c in validated):
+            raise ValueError("Candidate assumptions must belong to an assigned target or reviewed calibration context")
+        canonical = []
+        for candidate in validated:
+            registration = register_candidate(candidate, self.staged)
+            self.staged.merge(registration)
+            registered = registration.assumptions[0]
+            canonical.append({name: registered[name] for name in (
+                "subject", "field", "value", "unit", "statement", "basis", "entry_type", "derivation")
+                if name in registered})
+        changed_candidates = [candidate for candidate in canonical
                               if self.candidates.get(self.candidate_key(candidate)) != candidate]
-        self.candidates.update((self.candidate_key(candidate), candidate) for candidate in validated)
+        self.candidates.update((self.candidate_key(candidate), candidate) for candidate in canonical)
         for candidate in changed_candidates:
             self.run.emit_trace("target_input_candidate", status="proposed_not_admitted",
                 episode_id=self.goal.goal_id, investigated_target_subjects=list(self.requested_subjects),
@@ -618,55 +777,23 @@ class InvestigationSource(ResearchSource):
                 target_scenarios=self.parent_contract.measurements.get("target_scenarios"))))
 
     def assess(self, result):
-        """Always run before this episode's credit projection, never as an action."""
+        """Retain registered claims before common numeric grading and selection."""
         working = Ledger(self.staged.result())
         working.merge(result)
-        failed = False
-        assessed = 0
+        # Also support restored episodes whose candidates predate registration.
         for key, candidate in self.candidates.items():
-            field = candidate["field"]
-            options = working.evidence_options()
-            current = working.assumptions.get(key)
-            # Cross-field physical evidence can support or contradict a hypothesis.
-            # The reviewer, not a field-name filter or proposer, judges relevance.
-            relevant = options
-            basis_version = identity([candidate, list(relevant.values()), working.scenarios.get(candidate["subject"])])
-            if current and current.get("assessment_basis_version") == basis_version:
-                continue
-            try:
-                assessment = assess_assumption(self.run.complete, {**candidate, "evidence": list(relevant)}, working,
-                    self.context())
-                assessment.assumptions[0]["assessment_basis_version"] = basis_version
-                working.merge(assessment)
-                assessed += 1
-            except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
-                failed = True
-                failure = self.failure_result(exc, "mandatory_reasonableness_assessment")
-                # An unfinished review is not a new scientific judgment.
-                completed = current and current.get("review", {}).get("completed", True)
-                if current is None:
-                    try:
-                        hypothesis = unassessed_assumption(candidate, working)
-                    except (ValueError, TypeError, KeyError):
-                        hypothesis = None
-                    if hypothesis is not None:
-                        working.merge(ResearchResult(assumptions=(hypothesis,)))
-                state = {
-                    "retained_version": current.get("version") if completed else None,
-                    "retained_basis_version": current.get("assessment_basis_version") if completed else None,
-                    "unassessed_basis_version": basis_version,
-                    "hypothesis_available": key in working.assumptions,
-                    "meaning": ("Prior completed judgment and credit retained; new material or rationale was not reassessed. "
-                                "The failed attempt establishes neither new support nor an invalidation."
-                                if completed else "No completed judgment exists. Any valid recorded candidate remains an unassessed "
-                                "hypothesis usable for conditional calculations, with no evidence or assessment credit."),
-                }
-                working.merge(replace(failure, diagnostics=tuple({**d,
-                    "subject": candidate["subject"], "field": field, "proposal": candidate,
-                    "assessment_state": state}
-                    for d in failure.diagnostics)))
-        reviewed = working.result(evaluated=assessed > 0 or (result.evaluated and not failed), stop_reason=result.stop_reason)
-        return super().assess(reviewed)
+            if key not in working.assumptions:
+                working.merge(register_candidate(candidate, working))
+        return super().assess(working.result(evaluated=result.evaluated,
+                                            stop_reason=result.stop_reason))
+
+    def review_registered_candidates(self, result):
+        """Apply the common cached support review after common value projection."""
+        working = Ledger(result)
+        working.merge(assess_registered_candidates(self.run.complete, working,
+            self.candidates, self.context(), self.failure_result,
+            stage="mandatory_reasonableness_assessment"))
+        return working.result(evaluated=result.evaluated, stop_reason=result.stop_reason)
 
 
 def run_guideline_research(*, disease, providers, research_request="", metrics=DEFAULT_METRICS, limits=None, scenario="bazant-bush"):
@@ -687,7 +814,9 @@ def run_guideline_research(*, disease, providers, research_request="", metrics=D
                "Do not discover or replace scenarios, assign arbitrary exposure durations, or target "
                "published numerical answers. " + research_request).strip()
     from .scenario_sharing import initialize_parameter_scope
-    initial = initialize_parameter_scope(initial_scenarios(load_scenarios(scenario)),
+    initial = initialize_model_defaults(initial_scenarios(load_scenarios(scenario)),
+        providers.scenario_parameter_assessor, disease=disease)
+    initial = initialize_parameter_scope(initial,
         providers.scenario_parameter_assessor, disease=disease)
     return _run_research(research_request=request, providers=providers, metrics=DEFAULT_METRICS,
                          limits=limits, initial=initial, disease=disease,

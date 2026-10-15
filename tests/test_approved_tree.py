@@ -940,7 +940,15 @@ class ReadingBindingTests(unittest.TestCase):
 
 class CalculationToolTests(unittest.TestCase):
     def ledger(self, values, conditions=()):
-        ledger = Ledger(ResearchResult(scenarios=({"subject": "case", "description": "Synthetic test room"},)))
+        from episodic_workflow.task_executors.scenario_metrics.dependencies import CALCULATED_PARAMETER_FIELDS
+        supplied = {field: {"value": value, "unit": UNITS[field]}
+                    for field, value in values.items() if field in CALCULATED_PARAMETER_FIELDS}
+        ledger = Ledger(ResearchResult(scenarios=({"subject": "case", "description": "Synthetic test room",
+            "fixed_parameters": supplied, "assumption_needs": list(values)},)))
+        from episodic_workflow.case_reports.research.scenarios import Scenario, initial_scenarios
+        givens = initial_scenarios((Scenario("case", "Synthetic supplied inputs",
+            tuple((field, row["value"]) for field, row in supplied.items()), variables=()),))
+        ledger.merge(ResearchResult(facts=givens.facts, assumptions=givens.assumptions))
         for field, value in values.items():
             ledger.merge(ResearchResult(facts=(Fact("case", field, value, UNITS[field], "source_observation",
                 "Synthetic fixture, not real evidence", "https://example.test/case",
@@ -948,17 +956,21 @@ class CalculationToolTests(unittest.TestCase):
         ledger.merge(ResearchResult(evidence=({"subject": "case", "fields": list(conditions), "claim": "Synthetic conditions",
             "source": "https://example.test/case", "quote": "Synthetic conditions", "context": "Test", "basis": "Test"},)))
         for field in (*values, *conditions):
+            if field in supplied:
+                continue
             ledger.merge(assess_assumption(supported_review, {"subject": "case", "field": field,
                 "value": values.get(field), "unit": UNITS.get(field, "condition"), "statement": f"Assume {field}",
                 "basis": "Synthetic fixture", "evidence": list(ledger.evidence_options())}, ledger, {}))
         return ledger
 
     def execute(self, ledger, name, fields, **kwargs):
-        facts = {}
-        for key, fact in ledger.options().items():
-            if fact.field in fields:
-                facts[fact.field] = key
-        return execute_tool({"action": name, "subject": "case", "facts": list(facts.values()),
+        inputs = {}
+        if ledger.scenarios["case"].get("role", "target") != "target":
+            from episodic_workflow.case_reports.research.records import numeric_provenance
+            native = {fact.field: key for key, fact in numeric_provenance(ledger).items()
+                      if fact.subject == "case" and fact.field in fields}
+            inputs["source_inputs"] = list(native.values())
+        return execute_tool({"action": name, "subject": "case", **inputs,
             "basis": "Explicit synthetic model", **kwargs}, ledger, tuple(kwargs.get("metrics", ())),
             review={"admit": True, "reason": "Matched synthetic event; conditional check", "limitations": []})
 
@@ -1008,6 +1020,7 @@ class CalculationToolTests(unittest.TestCase):
                   "exposure_time_s": 3600, "removal_capacity_m3_s": .2, "breathing_flow_m3_s": .00015,
                   "mask_penetration": 1, "relative_transmissibility": 1}
         ledger = self.ledger(values, conditions)
+        ledger.scenarios["case"]["role"] = "calibration"
         calibration = self.execute(ledger, "calibrate_infectiousness", values,
                                   operator="cq_from_steady_outbreak", conditions=conditions)
         ledger.merge(calibration)

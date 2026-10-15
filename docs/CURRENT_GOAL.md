@@ -5,6 +5,53 @@ paper-scenarios-only goal with the generalized goal below while preserving the
 agreed default scenarios, three-output contract, and episodic architecture.
 It specifies required behavior, not a claim that acceptance has been achieved.
 
+## Parameter And Calculation Planning (2026-10-15)
+
+Before research, run the almost-universal-constants judge, then the shared-parameter
+judge, then initialize credit. The constants judge retains the configured gravity,
+air density, air viscosity and water-like particle density unless a concrete target
+scenario feature requires material variation. The default scenarios retain all four.
+Only promoted properties enter the shared-parameter judge's initial input list.
+Caller-supplied values take precedence. Retained defaults are automatically supplied
+model premises with provenance and receive no discovery credit.
+
+Track found parameters and calculation steps separately. The found denominator is
+the number of independent required values after sharing; it excludes retained
+defaults and the four calculated fields (quanta emission, settling speed, removal
+capacity and removal rate). Enumerate relevant executable calculation steps and
+alternative recipes without making them a mandatory sequence. Each step shows its
+status, actual dependencies, credit and readiness to run or rerun in existing
+episode inputs and reports.
+
+Every validated native source value automatically creates a conditional target
+alternative for each independent group needing that quantity. No additional
+investigation proposal or target reasonableness review is required to enter the
+main value table or receive discovery credit. Select the value with the highest
+source-scenario relevance for that specific value and parameter; preserve other
+values as alternatives. Unknown or zero relevance does not block finding a value.
+One independent group earns one discovery point, without multiplying credit for
+alternatives or shared target cases. Replacing the selected number invalidates
+dependent calculations; a relevance-only change to the same number does not.
+Target calculations read the current main table automatically. Calculation requests
+specify the scenario, operation, outputs and model conditions; they cannot supply
+numeric candidate references. Fixed scenario values and retained constants are
+supplied automatically, and reused computed inputs must be current. Competing
+candidate records remain available for inference and provenance, without forming
+a second target calculation input interface. Source calibration retains its own
+native source records. Readiness, execution and calculation credit must use the
+same main-table values. When a calculation uses an automatic source value, the
+existing reasonableness assessment reviews that same record in place. Reuse a completed assessment while
+its claim, evidence and target scope are unchanged. Assessment failure preserves
+the value and its discovery credit, and conditional arithmetic can still execute.
+
+A completed, accepted step earns a minimum 0.125, comprising 0.025 retained work
+and 0.100 current-result credit. Requested outputs can retain the existing stronger
+support score instead of the floor. A stale result loses current-result credit and
+the support bonus, retaining 0.025; recalculation restores the current contribution.
+Unchanged-claim evidence reviews do not require repeated arithmetic. All active
+ancestor scores update after a committed change, without adding synthetic yield
+observations. These scores do not establish scientific completion.
+
 ## Objective
 
 Build one generalized, executable episodic workflow for airborne-disease safety
@@ -132,8 +179,9 @@ or published-number target metric.
   score new global progress above each episode's inherited baseline, including
   the root. Track both executable route alternatives so progress on a jet input
   is visible even when the uniform route currently has fewer missing inputs.
-  Score and report assessed target assumptions fulfilled out of the scenarios'
-  declared assumption needs, excluding fixed caller givens. Keep
+  Score and report independent target values found, excluding fixed caller
+  givens, retained defaults and calculated quantities. Report scientific
+  assessment separately from whether a numeric value is available. Keep
   source-local evidence credit and assumption review distinct from this
   readiness projection. A route with available inputs is not thereby supported.
 - When a reading page, search, or evidence strategy obtains new scored parameter
@@ -153,8 +201,9 @@ or published-number target metric.
   another investigation; use its consequences to target the next uncertainty.
   When a specific physical input is missing, request a focused hypothesis
   proposal rather than a broad source survey before trying the calculation.
-  Assumption reasonableness assessment remains mandatory credit assignment, not
-  an optional tool. Search and document examination remain iterative episodes.
+  Inferred hypotheses receive mandatory reasonableness assessment; that review
+  qualifies their support and does not gate source-value discovery credit.
+  Search and document examination remain iterative episodes.
 - Parents specify the information contract needed from each child. Children
   synthesize condensed findings, cumulative support, unresolved uncertainty,
   contradictions, and their implications for the parent's goal. Include actual

@@ -3,7 +3,9 @@
 from collections import defaultdict
 from collections.abc import Mapping
 
-from .progress import ADDITIONAL_SUPPORT, evidence_key, parameter_support
+from ...task_executors._http import ProviderError
+from .progress import ADDITIONAL_SUPPORT, evidence_key, parameter_requirements, parameter_support
+from .model_defaults import retained_defaults
 from .records import Credit, ResearchResult, identity
 
 
@@ -14,8 +16,9 @@ TARGET_RELEVANCE_CREDIT_MEANING = (
     "Evidence-filled inputs earn up to one point each within a related source-event type, plus 0.1 "
     "for distinct corroboration of the same source-event subject. Each field uses its strongest current "
     "event-to-target relevance and comparison coverage; only the strongest type contributes for that target. "
-    "Original observations retain their event identity. This is learning credit, not "
-    "permission to transfer a numeric value without a reviewed assumption."
+    "Original observations retain their event identity. Eligible source values automatically "
+    "become conditional target alternatives; applicability grades select among them, while "
+    "scientific support is reviewed separately."
 )
 
 
@@ -63,7 +66,7 @@ def _plain_value(value):
 def target_comparison_context(definition, assumptions):
     """Compare source applicability to scenario inputs, not candidate wording."""
     return {name: _plain_value(definition.get(name, {} if name != "assumption_needs" else []))
-            for name in ("description", "fixed_parameters", "fixed_conditions", "assumption_needs")}
+            for name in ("description", "fixed_parameters", "fixed_conditions", "assumption_needs", "model_defaults")}
 
 
 def _unchanged_relationships(source, profiles, targets, parameter, relationships):
@@ -121,9 +124,19 @@ def assess_source_types_with_jev(agent, jev_assess, source, profiles, targets,
                    for group in groups)):
         raise ValueError("Source-event classification has an invalid type or basis")
 
+    relationships = assess_jev_relationships(jev_assess, source, profiles, targets,
+        disease=disease, parameter=parameter, previous_relationships=previous_relationships)
+    scores = {(row["source_subject"], row["target_subject"]): row["score"] for row in relationships}
+    return [{**group, "target_relevance": {target: max(scores[(subject, target)]
+            for subject in group["subjects"]) for target in targets}} for group in groups], relationships
+
+
+def assess_jev_relationships(jev_assess, source, profiles, targets, *, disease=None,
+                             parameter=None, previous_relationships=()):
+    """Grade source/target applicability without requiring event reclassification."""
+    subjects = sorted(subject for locator, subject in profiles if locator == source)
     unchanged = _unchanged_relationships(source, profiles, targets, parameter, previous_relationships)
     relationships = []
-    scores = {}
     for subject in subjects:
         profile = profiles[(source, subject)]
         changed_targets = {name: target for name, target in targets.items() if (subject, name) not in unchanged}
@@ -135,7 +148,6 @@ def assess_source_types_with_jev(agent, jev_assess, source, profiles, targets,
         for target_subject, target in targets.items():
             if (subject, target_subject) in unchanged:
                 relation = unchanged[(subject, target_subject)]
-                scores[(subject, target_subject)] = relation["score"]
                 relationships.append(relation)
                 continue
             probability = probabilities[target_subject]
@@ -143,7 +155,6 @@ def assess_source_types_with_jev(agent, jev_assess, source, profiles, targets,
                     or not 0 <= probability <= 1):
                 raise ValueError("Jev source-target probability must be between zero and one")
             score = float(probability)
-            scores[(subject, target_subject)] = score
             relationships.append({"source": source, "source_subject": subject,
                 "target_subject": target_subject, "parameter": parameter,
                 "target_version": identity(target),
@@ -162,8 +173,100 @@ def assess_source_types_with_jev(agent, jev_assess, source, profiles, targets,
                         "fixed_conditions": target.get("fixed_conditions", {}),
                         "recorded_hypotheses": target.get("recorded_hypotheses", {})}}],
                 "known": 1, "considered": 1})
-    return [{**group, "target_relevance": {target: max(scores[(subject, target)]
-            for subject in group["subjects"]) for target in targets}} for group in groups], relationships
+    return relationships
+
+
+def assess_numeric_target_relationships(ledger, jev_assess, *, disease=None, candidates=None):
+    """Grade every normalized numeric candidate with the same per-value mechanism.
+
+    A source's local research assignment does not restrict this projection.
+    Current relationship versions are reused on subsequent child returns.
+    Without an assessor, values remain eligible with unknown relevance.
+    """
+    if jev_assess is None:
+        return ResearchResult()
+    from .scenario_sharing import independent_groups
+    from .target_values import target_value_candidates, source_value_profiles, relevance_profile_version
+
+    result = ledger.result()
+    candidates = target_value_candidates(ledger) if candidates is None else candidates
+    subjects_by_field = {}
+    groups = independent_groups(ledger)
+    subjects_by_group = {group["group_id"]: set(group["subjects"]) for group in groups}
+    for group in groups:
+        subjects_by_field.setdefault(group["parameter"], set()).update(group["subjects"])
+    changes, diagnostics, issues = [], [], []
+    for field in sorted(subjects_by_field):
+        eligible = [candidate for candidate in candidates if candidate["field"] == field
+                    and candidate["target_groups"]]
+        source_keys = {(candidate["source"], candidate["subject"]) for candidate in eligible}
+        if not source_keys:
+            continue
+        targets = {subject: target_comparison_context(ledger.scenarios[subject], result.assumptions)
+                   for subject in sorted(subjects_by_field[field])}
+        profiles = {key: profile for key, profile in source_value_profiles(
+                        ledger, parameter_requirements(field), candidates=candidates).items()
+                    if key in source_keys}
+        for source, source_subject in sorted(profiles):
+            profile = profiles[(source, source_subject)]
+            values = [candidate for candidate in eligible
+                      if (candidate["source"], candidate["subject"]) == (source, source_subject)]
+            rows = {}
+            for target_subject, target in targets.items():
+                target_values = [candidate for candidate in values if any(target_subject in subjects_by_group[group]
+                                 for group in candidate["target_groups"])]
+                if not target_values:
+                    continue
+                previous = ledger.source_target_relationships.get((source, source_subject, target_subject, field), {})
+                current = previous.get("target_version") == identity(target)
+                valid_keys = {candidate["key"] for candidate in target_values}
+                versions = {candidate["key"]: candidate["version"] for candidate in target_values}
+                scores = {key: score for key, score in previous.get("source_value_scores", {}).items()
+                          if current and key in valid_keys
+                          and previous.get("source_value_versions", {}).get(key) == versions[key]}
+                rows[target_subject] = {**previous, "source_value_scores": scores,
+                    "source_value_versions": versions,
+                    "source_value_contexts": {candidate["key"]: "; ".join(candidate["profile"]["contexts"])
+                                              for candidate in target_values}}
+            for candidate in values:
+                missing = {subject: target for subject, target in targets.items()
+                           if subject in rows and candidate["key"] in rows[subject]["source_value_versions"]
+                           and candidate["key"] not in rows[subject]["source_value_scores"]}
+                if not missing:
+                    continue
+                value_profile = candidate["profile"]
+                try:
+                    reviewed = assess_jev_relationships(jev_assess, source,
+                        {(source, source_subject): value_profile}, missing, disease=disease, parameter=field)
+                except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+                    why = f"Source-value relevance remains unknown: {type(exc).__name__}: {exc}"
+                    issues.append(why)
+                    diagnostics.append({"stage": "source_value_relevance", "category": "assessment_incomplete",
+                        "source": source, "source_subject": source_subject, "field": field,
+                        "value": candidate["value"], "unit": candidate["unit"],
+                        "target_subjects": list(missing), "why": why})
+                    continue
+                for relation in reviewed:
+                    subject = relation["target_subject"]
+                    row = rows[subject]
+                    scores = row["source_value_scores"]
+                    scores[candidate["key"]] = relation["score"]
+                    rows[subject] = {**relation, **row, "source_value_scores": scores}
+            for subject, row in rows.items():
+                if not row["source_value_scores"]:
+                    continue
+                row.update(source=source, source_subject=source_subject, target_subject=subject, parameter=field,
+                    target_version=identity(targets[subject]), source_profile_version=relevance_profile_version(profile),
+                    source_role=sorted(profile["kinds"]), source_contexts=list(profile["contexts"]),
+                    score=max(row["source_value_scores"].values()),
+                    jev_probability=max(row["source_value_scores"].values()),
+                    assessment_method="jev_noul_per_value", known=1, considered=1,
+                    basis="Each recorded value and its provenance are graded for this field against the target scenario; the aggregate is only a summary.")
+                key = (source, source_subject, subject, field)
+                if ledger.source_target_relationships.get(key) != row:
+                    changes.append(row)
+    return ResearchResult(source_target_relationships=tuple(changes),
+                          diagnostics=tuple(diagnostics), issues=tuple(issues))
 
 
 def assess_source_types(agent, source, profiles, targets, known_groups, disease=None, *, parameter=None,
@@ -203,11 +306,12 @@ def assess_source_types(agent, source, profiles, targets, known_groups, disease=
             "target context. Unknown is not a mismatch. Do not invent values or treat target inputs "
             "as source observations. Source facts, target givens, and recorded target hypotheses "
             "with review status are supplied separately. "
-            "Relevance is a multiplier for learning from these sources, not a claim of scientific confidence "
-            "or permission to copy numerical values. Use 0 for unrelated contexts, 0.25 for a remote analogy, "
+            "Relevance is a multiplier for learning from these sources, not a claim of scientific confidence. "
+            "Use 0 for unrelated contexts, 0.25 for a remote analogy, "
             "0.5 for a related mechanism with major transfer differences, 0.75 for a close but qualified match, "
             "and 1 only for a directly matching context. A related type remains available even at low relevance; "
-            "an explicit, reviewed transfer is still needed before target calculations use its values. "
+            "eligible source values automatically become conditional target alternatives without a relevance "
+            "threshold or a separate transfer action. Their scientific support is reviewed separately. "
             "Return every supplied subject exactly once in a group and every pair listed in "
             "comparison_variables exactly once in relationships, excluding unchanged_relationships."
         ),
@@ -323,8 +427,10 @@ def target_relevance_credit(result, requirements, groups, targets, *, parameter=
                for evidence in assessment.get("invalidated_evidence", ())}
     relationships = {(row["source"], row["source_subject"], row["target_subject"], row["parameter"]): row
                      for row in result.source_target_relationships}
-    profiles = source_profiles(result, requirements) if relationships else {}
+    profile_fields = parameter_requirements(parameter) if parameter is not None else requirements
+    profiles = source_profiles(result, profile_fields) if relationships else {}
     for target in targets:
+        target_requirements = set(requirements) - retained_defaults(targets[target]).keys()
         choices = []
         for type_id, group in groups.items():
             if not group["members"]:
@@ -348,7 +454,7 @@ def target_relevance_credit(result, requirements, groups, targets, *, parameter=
                     multipliers.append(multiplier)
                     facts = tuple(fact for fact in result.facts if (fact.source, fact.subject) == (source, subject)
                                   and evidence_key(fact.semantic_record()) not in invalid)
-                    for row in parameter_support(ResearchResult(facts=facts), requirements):
+                    for row in parameter_support(ResearchResult(facts=facts), target_requirements):
                         field_points[row["field"]] = max(field_points.get(row["field"], 0),
                                                          multiplier * row["points"])
                 rows = [{"field": field, "points": round(value, 10)} for field, value in sorted(field_points.items())]
@@ -357,7 +463,7 @@ def target_relevance_credit(result, requirements, groups, targets, *, parameter=
             else:
                 facts = tuple(fact for fact in result.facts if (fact.source, fact.subject) in members
                               and evidence_key(fact.semantic_record()) not in invalid)
-                rows = parameter_support(ResearchResult(facts=facts), requirements)
+                rows = parameter_support(ResearchResult(facts=facts), target_requirements)
                 multiplier = group["target_relevance"].get(target, 0)
                 points = round(multiplier * sum(row["points"] for row in rows), 10)
                 rows = [{"field": row["field"], "points": round(multiplier * row["points"], 10)}

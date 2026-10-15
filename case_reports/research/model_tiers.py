@@ -28,6 +28,8 @@ CALL_SITE_TIERS = MappingProxyType({
     "review_research_evidence": ModelTier.REASONING,
     "assess_assumption_reasonableness": ModelTier.REASONING,
     "review_scenario_scope": ModelTier.REASONING,
+    "assess_scenario_model_defaults": ModelTier.REASONING,
+    "analyze_scenario_parameter_scope": ModelTier.REASONING,
     "review_research_model": ModelTier.REASONING,
     "assess_source_event_types": ModelTier.REASONING,
     "synthesize_research_findings": ModelTier.REASONING,

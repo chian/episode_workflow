@@ -75,9 +75,31 @@ def cited_assessment_evidence(assessment):
     return {key: item for key, item in assessment["evidence"].items() if key in references}
 
 
+def target_value_model_view(row):
+    """Expose value-specific relevance while retaining audit indexes in the ledger."""
+    applicability = row.get("source_applicability")
+    if not isinstance(applicability, dict):
+        return row
+    relationships = []
+    for relation in applicability.get("relationships", ()):
+        compact = {key: relation[key] for key in (
+            "source", "source_subject", "target_subject", "parameter", "score", "basis", "source_contexts")
+            if key in relation}
+        value_context = relation.get("source_value_contexts", {}).get(relation.get("source_fact_key"))
+        if value_context is not None:
+            compact["source_contexts"] = [value_context]
+        relationships.append(compact)
+    return {**row, "source_applicability": {
+        **{key: applicability[key] for key in ("status", "score", "meaning") if key in applicability},
+        "relationships": relationships}}
+
+
 def assumption_model_view(assumption, *, evidence_options=None, numeric_options=None):
     """Present inference meaning without exposing protected child audit identities."""
-    view = dict(assumption)
+    view = dict(target_value_model_view(assumption))
+    # Native quantities, references and contexts are presented below through
+    # derivation inputs. Their internal fact identities are audit-only indexes.
+    view.pop("source_fact_keys", None)
     derivation = assumption.get("derivation", {})
     identities = ("source_evidence_ids", "input_fact_keys",
                   "input_assumption_versions", "input_assumption_claims")
@@ -107,6 +129,54 @@ def assessment_summary(assessment, *, numeric_options=None):
             "considered_evidence_count": len(assessment["evidence"])}
 
 
+def numeric_provenance(ledger):
+    """Index recorded numeric premises by identity for inference and source lineage.
+
+    Target calculations obtain their inputs from the main table in tools.py.
+    This index preserves the records cited by an inference, including alternatives.
+    """
+    from .model_defaults import retained_defaults
+    from .scenario_sharing import shared_assumptions
+
+    def retained(subject, field, value):
+        return retained_defaults(ledger.scenarios.get(subject, {})).get(field, {}).get("value") == value
+
+    records = {key: fact for key, fact in ledger.facts.items()
+        if not (fact.kind == "model_assumption" and fact.parents
+                and ledger.assumptions.get(fact.parents[0], {}).get("source_candidate_unavailable"))
+        and (fact.kind != "model_default" or retained(fact.subject, fact.field, fact.value))}
+    for assumption in ledger.assumptions.values():
+        if assumption["value"] is None or assumption.get("source_candidate_unavailable"):
+            continue
+        default = assumption.get("role") == "model_default"
+        if default and not retained(assumption["subject"], assumption["field"], assumption["value"]):
+            continue
+        fact = Fact(assumption["subject"], assumption["field"], assumption["value"],
+            assumption["unit"], "model_default" if default else "model_assumption", assumption["basis"],
+            context=assumption["statement"], parents=(assumption["key"],))
+        records[fact.key] = fact
+    for subject in ledger.scenarios:
+        for assumption, relation in shared_assumptions(ledger, subject):
+            fact = Fact(subject, assumption["field"], assumption["value"],
+                assumption["unit"], "model_assumption", assumption["basis"],
+                context=f"Shared from {assumption['subject']}: {assumption['statement']}",
+                parents=(assumption["key"], identity(relation)))
+            records[fact.key] = fact
+    return records
+
+
+
+def numeric_references(ledger):
+    """Parent-local citations for inference and native source inputs only.
+
+    Canonical identities remain in numeric_provenance and committed lineage;
+    these labels can cross the parent communication boundary. Target arithmetic
+    never consumes this reference view.
+    """
+    return {f"input:{index}": fact for index, fact in
+            enumerate(numeric_provenance(ledger).values(), 1)}
+
+
 def assumption_claim(assessment):
     """Identify the computation's claim separately from its evidence review."""
     return identity({k: assessment[k] for k in ("subject", "field", "value", "unit", "statement")})
@@ -127,8 +197,10 @@ def current_support(record, assessments, *, metric=None, ledger=None):
     if (not record.get("model_review", {}).get("admit", True)
             or not record.get("model_review", {}).get("completed", True)):
         return 0.0
-    if metric is not None and "metric_support" in record:
-        return current_support(record["metric_support"].get(metric, {}), assessments, ledger=ledger)
+    if metric is not None and ("metric_support" in record or "intermediate_support" in record):
+        dependency = record.get("metric_support", {}).get(metric,
+                     record.get("intermediate_support", {}).get(metric, {}))
+        return current_support(dependency, assessments, ledger=ledger)
     if not current_scenario_links(record, ledger):
         return 0.0
     if record.get("support_issues"):
@@ -142,7 +214,8 @@ def current_support(record, assessments, *, metric=None, ledger=None):
 
 def current_computation(record, assessments, metric, *, ledger=None):
     """A computed conditional consequence is distinct from its evidential support."""
-    row = record.get("metrics", record.get("output", {})).get(metric, {})
+    row = record.get("metrics", record.get("output", {})).get(metric,
+          record.get("intermediate_outputs", {}).get(metric, {}))
     if not isinstance(row, Mapping) or row.get("status") != "calculated":
         return False
     value = row.get("value")
@@ -151,22 +224,47 @@ def current_computation(record, assessments, metric, *, ledger=None):
         return False
     if not output_meets_contract(row, record.get("output_contracts", {}).get(metric)):
         return False
-    dependency = record.get("metric_support", {}).get(metric, record)
+    dependency = record.get("metric_support", {}).get(metric,
+                 record.get("intermediate_support", {}).get(metric, record))
     return current_premises(dependency, assessments, ledger=ledger)
 
 
 def current_scenario_links(record, ledger):
     links = record.get("scenario_parameter_links", ())
-    if not links:
+    bindings = record.get("scenario_input_bindings", ())
+    condition_bindings = record.get("scenario_condition_bindings", ())
+    if not links and not bindings and not condition_bindings:
         return True
     if ledger is None:
         return False
+    for binding in bindings:
+        scenario = ledger.scenarios.get(binding["subject"], {})
+        if binding["kind"] == "model_default":
+            current = scenario.get("model_defaults", {}).get(binding["field"], {})
+            if current.get("decision") != "retain":
+                return False
+        else:
+            current = scenario.get("fixed_parameters", {}).get(binding["field"], {})
+        if any(current.get(name) != binding[name] for name in ("value", "unit")):
+            return False
+    for binding in condition_bindings:
+        scenario = ledger.scenarios.get(binding["subject"], {})
+        if scenario.get("fixed_conditions", {}).get(binding["field"]) != binding["statement"]:
+            return False
     from .scenario_sharing import shared_assumptions
     for link in links:
-        if not any(a["key"] == link["assumption_key"] and identity(row) == link["relation_version"]
+        if not any(a["key"] == link["assumption_key"] and (
+                   identity(row) == link["relation_version"] or
+                   (link.get("scope_version") == sharing_scope_version(row)
+                    and link.get("assumption_claim") == assumption_claim(a)))
                    for a, row in shared_assumptions(ledger, link["target_subject"])):
             return False
     return True
+
+
+def sharing_scope_version(relation):
+    """Sharing scope is unchanged when only the evidence review is renewed."""
+    return identity({key: value for key, value in relation.items() if key != "assumption_version"})
 
 
 def current_premises(record, assessments, *, ledger=None):
@@ -215,7 +313,8 @@ def admitted_calculation(record, assessments, *, ledger, metric=None, field=None
         key = (row.get("version") or identity(row), selected_metric, selected_field)
         if key in visiting or not reviewed(row):
             return False
-        dependency = (row.get("metric_support", {}).get(selected_metric, row)
+        dependency = (row.get("metric_support", {}).get(selected_metric,
+                      row.get("intermediate_support", {}).get(selected_metric, row))
                       if selected_metric is not None else
                       row.get("derived_support", {}).get(selected_field, row)
                       if selected_field is not None else row)
@@ -280,7 +379,7 @@ class Fact(ClosedRecord):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f"Fact.{name} is required")
         object.__setattr__(self, "value", finite(self.value, self.field))
-        if self.kind not in {"user_assumption", "request_constraint", "scenario_constraint", "source_observation", "source_model_parameter", "model_assumption", "derived"}:
+        if self.kind not in {"user_assumption", "request_constraint", "scenario_constraint", "model_default", "source_observation", "source_model_parameter", "model_assumption", "derived"}:
             raise ValueError("Unknown fact kind")
         if any(not isinstance(getattr(self, name), str) for name in ("source", "quote", "context")):
             raise ValueError("Fact source, quote and context must be text")
@@ -425,6 +524,13 @@ class Ledger:
                         (*previous.get("scenario_parameter_links", ()), *estimate.get("scenario_parameter_links", ()))}.values()),
                     "metric_support": {**previous.get("metric_support", {}), **estimate.get("metric_support", {})},
                     "metric_dependencies": {**previous.get("metric_dependencies", {}), **estimate.get("metric_dependencies", {})},
+                    "intermediate_outputs": {**previous.get("intermediate_outputs", {}), **estimate.get("intermediate_outputs", {})},
+                    "intermediate_support": {**previous.get("intermediate_support", {}), **estimate.get("intermediate_support", {})},
+                    "intermediate_dependencies": {**previous.get("intermediate_dependencies", {}), **estimate.get("intermediate_dependencies", {})},
+                    "scenario_input_bindings": list({identity(row): row for row in
+                        (*previous.get("scenario_input_bindings", ()), *estimate.get("scenario_input_bindings", ()))}.values()),
+                    "scenario_condition_bindings": list({identity(row): row for row in
+                        (*previous.get("scenario_condition_bindings", ()), *estimate.get("scenario_condition_bindings", ()))}.values()),
                     "output_contracts": {**previous.get("output_contracts", {}), **estimate.get("output_contracts", {})},
                     "calculation_versions": list(dict.fromkeys([*previous.get("calculation_versions", ()),
                                                                 *estimate.get("calculation_versions", ())]))}
@@ -454,8 +560,7 @@ class Ledger:
         return {f"evidence:{i}": e for i, e in enumerate([*records, *self.evidence.values()], 1)}
 
     def assumption_options(self):
-        from .tools import input_options
-        numeric = input_options(self)
+        numeric = numeric_references(self)
         return {f"assumption:{i}": assessment_summary(a, numeric_options=numeric)
                 for i, a in enumerate(self.assumptions.values(), 1)}
 
@@ -511,6 +616,13 @@ def compatible_estimates(left, right):
             "metrics": {**left["metrics"], **right["metrics"]},
             "metric_support": {**left.get("metric_support", {}), **right.get("metric_support", {})},
             "metric_dependencies": {**left.get("metric_dependencies", {}), **right.get("metric_dependencies", {})},
+            "intermediate_outputs": {**left.get("intermediate_outputs", {}), **right.get("intermediate_outputs", {})},
+            "intermediate_support": {**left.get("intermediate_support", {}), **right.get("intermediate_support", {})},
+            "intermediate_dependencies": {**left.get("intermediate_dependencies", {}), **right.get("intermediate_dependencies", {})},
+            "scenario_input_bindings": list({identity(row): row for row in
+                (*left.get("scenario_input_bindings", ()), *right.get("scenario_input_bindings", ()))}.values()),
+            "scenario_condition_bindings": list({identity(row): row for row in
+                (*left.get("scenario_condition_bindings", ()), *right.get("scenario_condition_bindings", ()))}.values()),
             "output_contracts": {**left.get("output_contracts", {}), **right.get("output_contracts", {})},
             "derived_dependencies": {**left.get("derived_dependencies", {}), **right.get("derived_dependencies", {})},
             "input_provenance": {**left.get("input_provenance", {}), **right.get("input_provenance", {})},

@@ -100,7 +100,7 @@ class ResearchController:
         if not isinstance(value, Credit):
             raise TypeError("ResearchController requires Credit")
         previous = self.history[-1]
-        score = previous
+        score = self._score()
         if not value.evaluated:
             self.failures += 1
         else:
@@ -133,8 +133,25 @@ class ResearchController:
         return ResearchStep(self.stop, score, score - previous, value.evaluated, self.reason)
 
     def state(self):
-        return ResearchState(self.stop, self.history[-1], tuple(self.history),
+        return ResearchState(self.stop, self._score(), tuple(self.history),
                              self.failures, self.reason, self.rarefaction)
+
+    def refresh(self, value):
+        """Refresh shared credit without inventing a completed unit observation.
+
+        A suspended parent's current score follows child work immediately. Its
+        observation history still measures net yield between its own completed
+        units, so a child return cannot lose its gain merely because it was
+        already visible. The next observe handles any net retraction normally.
+        """
+        from ..case_reports.research.records import Credit
+        if not self.point_scores or not isinstance(value, Credit):
+            raise TypeError("Shared refresh requires point-score Credit")
+        if not value.evaluated:
+            return 0.0
+        previous = self._score()
+        self._qualities(value)
+        return self._score() - previous
 
     def transitioned(self, epoch):
         return ResearchController(self.columns, window=self.window, capacity=self.capacity, epoch=epoch,
