@@ -18,7 +18,7 @@ def report_projection(ledger):
         "objective": "Offline calculation reporting fixture", "status": "partial",
         "interpretation": "Conditional synthetic calculation", "global_scientific_goal": goal,
         "scenarios": scenarios, "assumption_assessments": list(result.assumptions),
-        "observation_comparisons": [], "unresolved": [],
+        "observation_comparisons": [],
         "validation": {"calibration": "No calibration in this fixture."},
         "paper_coverage": {"not_implemented": []},
         "control": {"reason": "offline test", "method": "deterministic execution"},

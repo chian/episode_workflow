@@ -258,7 +258,7 @@ class ResearchReport(ClosedRecord):
             "source_reading_coverage": reading_coverage(result.reading_attempts),
             "episode_tree": {parent.name: [child.name for child in children]
                              for parent, children in run.tree.children.items()},
-            "findings": list(result.findings), "unresolved": list(result.issues),
+            "findings": list(result.findings),
             "control": {"ended_by": record.ended_by, "reason": result.stop_reason,
                         "credit_history": list(record.controller_state.history),
                         "rarefaction": record.controller_state.rarefaction,
@@ -406,11 +406,10 @@ class ResearchReport(ClosedRecord):
                 for name, row in alternative["metrics"].items():
                     quality = alternative["current_metric_support"][name]
                     support = "not established" if not quality else "supported" if quality == 1 else "provisional"
-                    notes = [*row.get("missing", []), row.get("applicability_warning", ""),
+                    notes = [*row.get("missing", []),
                              fixed_inputs(row),
                              row.get("interpretation", "") if row.get("regime") == "well_mixed_distance" or row.get("model_id") else "",
-                             row.get("applicability", {}).get("reason", ""),
-                             *alternative.get("metric_support", {}).get(name, {}).get("support_issues", ())]
+                             row.get("applicability", {}).get("reason", "")]
                     lines.append(f"| {cell(name)} | {quantity(row)} | {cell(row.get('unit', ''))} | {support} | {cell('; '.join(n for n in notes if n))} |")
                 qualities = set(alternative["current_metric_support"].values())
                 support = ("mixed; see individual quantities" if len(qualities) > 1 else
@@ -418,7 +417,6 @@ class ResearchReport(ClosedRecord):
                            "supported" if qualities == {1} else "provisional")
                 lines.extend(["", f"Current output support: {support}.",
                               "", "Named model assumptions:", ""])
-                lines.extend(f"- Support gap: {issue}" for issue in alternative.get("support_issues", ()))
                 if not alternative.get("model_review", {}).get("admit", True):
                     lines.append(f"- Model review: {alternative['model_review']['reason']}")
                 lines.extend(f"- {name}: {basis}" for name, basis in alternative["conditions"].items())
@@ -456,8 +454,6 @@ class ResearchReport(ClosedRecord):
                              f"{comparison['predicted']:.8g} | {comparison['observed']:.8g} | {comparison['residual']:.8g} | "
                              f"{comparison['category']} | {comparison['support_status']} |")
             lines.append("")
-        lines.extend(["## Unresolved Questions", ""])
-        lines.extend(f"- {item}" for item in self.data["unresolved"])
         lines.extend(["", "## Validation", "", self.data["validation"]["calibration"], "",
                       "Independent validation: not performed.", "", "## Remaining Scope", ""])
         lines.extend(f"- {item}" for item in self.data["paper_coverage"]["not_implemented"])

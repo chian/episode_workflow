@@ -188,12 +188,12 @@ def evaluate_model(agent, action, facts, context, metrics, *, assumptions=()):
         raise ValueError("All scenario inputs must belong to this subject; transfer must be explicit")
     selected = {f.field: f.value for f in facts}
     selected_assumptions = []
-    support_issues = []
+    support_complete = True
     for field, value in selected.items():
         supported = [a for a in assumptions if a["subject"] == subject and a["field"] == field
                      and a["value"] == value]
         if not supported:
-            support_issues.append(f"Parameter {field} has no completed reasonableness assessment")
+            support_complete = False
         else:
             selected_assumptions.append(max(supported, key=lambda a: a["reasonableness"]))
     conditions = action.get("conditions", {})
@@ -203,7 +203,7 @@ def evaluate_model(agent, action, facts, context, metrics, *, assumptions=()):
         supported = [a for a in assumptions if a["subject"] == subject and a["field"] == field
                      and a["statement"] == statement]
         if not supported:
-            support_issues.append(f"Condition {field} has no completed reasonableness assessment")
+            support_complete = False
         else:
             selected_assumptions.append(max(supported, key=lambda a: a["reasonableness"]))
     review = review_model(agent, action, facts, context)
@@ -212,7 +212,6 @@ def evaluate_model(agent, action, facts, context, metrics, *, assumptions=()):
                                 provenance={f.field: f.as_record() for f in facts})
     result["assumption_keys"] = [a["key"] for a in selected_assumptions]
     result["assumption_support"] = selected_assumptions
-    result["model_review"], result["support_issues"] = review, support_issues
+    result["model_review"], result["support_complete"] = review, support_complete
     result["reasonableness"] = current_support(result, {a["key"]: a for a in assumptions})
-    missing = tuple(sorted({item for m in result["metrics"].values() for item in m.get("missing", [])}))
-    return ResearchResult(estimates=(result,), findings=tuple(review.get("limitations", [])), issues=missing)
+    return ResearchResult(estimates=(result,), findings=tuple(review.get("limitations", [])))

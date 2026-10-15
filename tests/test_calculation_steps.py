@@ -347,13 +347,14 @@ class CalculationStepTests(unittest.TestCase):
         ledger = fixture()
         add_assumption(ledger, "floor_area_m2", 10)
         add_assumption(ledger, "room_height_m", 20)
-        result = execute_tool({"action": "calculate_geometry_and_removal", "subject": "target",
-            "metrics": [OUTPUT],
-            "basis": "Intentionally inconsistent geometry", "parameterization": "inconsistent"},
-            ledger, (OUTPUT,), review={"admit": True, "reason": "Fixture accepted before numerical check"})
-        ledger.merge(result)
-        self.assertTrue(result.estimates[0]["issues"])
-        self.assertFalse(result.facts)
+        with self.assertRaises(ValueError):
+            execute_tool({"action": "calculate_geometry_and_removal", "subject": "target",
+                "metrics": [OUTPUT],
+                "basis": "Intentionally inconsistent geometry", "parameterization": "inconsistent"},
+                ledger, (OUTPUT,), review={"admit": True, "reason": "Fixture accepted before numerical check"})
+        self.assertFalse(ledger.calculations)
+        self.assertFalse(ledger.estimates)
+        self.assertFalse([fact for fact in ledger.facts.values() if fact.kind == "derived"])
         self.assertEqual(calculation_step_status(ledger.result(), (OUTPUT,))["points"], 0)
 
     def test_declared_duration_variable_is_not_a_missing_scalar_input(self):

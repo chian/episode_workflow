@@ -52,6 +52,15 @@ Unchanged-claim evidence reviews do not require repeated arithmetic. All active
 ancestor scores update after a committed change, without adding synthetic yield
 observations. These scores do not establish scientific completion.
 
+There is no passive `issues` collection. Failed operations record a failed
+structured diagnostic; rejected source rows are excluded. Invalid numerical
+inputs abort that calculation before publishing results. Each requested quantity
+records whether it was calculated, lacked inputs, or was outside the model's
+domain. Evidence support remains a separate assessment and does not gate found
+values or otherwise executable conditional arithmetic. Reused calculations carry
+only the dependencies of the reused output, including the original sharing-scope
+and claim records. Evidence-review metadata changes alone do not invalidate them.
+
 ## Objective
 
 Build one generalized, executable episodic workflow for airborne-disease safety

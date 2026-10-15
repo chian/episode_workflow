@@ -59,7 +59,7 @@ class NativeSourceAdmissionTests(unittest.TestCase):
         self.assertEqual({f.kind for f in options}, {"source_model_parameter"})
         for value in (18, 69, 148, 676):
             self.assertTrue(any(abs(f.value - value / 3600) < 1e-12 for f in options))
-        self.assertFalse(result.assumptions or result.issues)
+        self.assertFalse(result.assumptions or result.diagnostics)
 
     def test_recipient_flows_and_other_target_fields_remain_numeric(self):
         facts = [

@@ -195,7 +195,7 @@ def assess_numeric_target_relationships(ledger, jev_assess, *, disease=None, can
     subjects_by_group = {group["group_id"]: set(group["subjects"]) for group in groups}
     for group in groups:
         subjects_by_field.setdefault(group["parameter"], set()).update(group["subjects"])
-    changes, diagnostics, issues = [], [], []
+    changes, diagnostics = [], []
     for field in sorted(subjects_by_field):
         eligible = [candidate for candidate in candidates if candidate["field"] == field
                     and candidate["target_groups"]]
@@ -240,8 +240,7 @@ def assess_numeric_target_relationships(ledger, jev_assess, *, disease=None, can
                         {(source, source_subject): value_profile}, missing, disease=disease, parameter=field)
                 except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
                     why = f"Source-value relevance remains unknown: {type(exc).__name__}: {exc}"
-                    issues.append(why)
-                    diagnostics.append({"stage": "source_value_relevance", "category": "assessment_incomplete",
+                    diagnostics.append({"stage": "source_value_relevance", "category": "assessment_incomplete", "status": "failed",
                         "source": source, "source_subject": source_subject, "field": field,
                         "value": candidate["value"], "unit": candidate["unit"],
                         "target_subjects": list(missing), "why": why})
@@ -266,7 +265,7 @@ def assess_numeric_target_relationships(ledger, jev_assess, *, disease=None, can
                 if ledger.source_target_relationships.get(key) != row:
                     changes.append(row)
     return ResearchResult(source_target_relationships=tuple(changes),
-                          diagnostics=tuple(diagnostics), issues=tuple(issues))
+                          diagnostics=tuple(diagnostics))
 
 
 def assess_source_types(agent, source, profiles, targets, known_groups, disease=None, *, parameter=None,

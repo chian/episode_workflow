@@ -44,8 +44,8 @@ class SelectedSourceReviewTests(unittest.TestCase):
     def source(self):
         return SimpleNamespace(run=SimpleNamespace(complete=self.complete, metrics=DEFAULT_METRICS),
             leaf=lambda callback, action: callback(),
-            failure_result=lambda exc, stage: ResearchResult(issues=(str(exc),),
-                diagnostics=({"stage": stage, "why": str(exc)},)))
+            failure_result=lambda exc, stage: ResearchResult(evaluated=False,
+                diagnostics=({"stage": stage, "status": "failed", "why": str(exc)},)))
 
     def calculate(self, subject="target-alpha"):
         statement = "Small spherical particles in the Stokes regime."

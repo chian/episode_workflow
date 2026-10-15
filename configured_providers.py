@@ -284,6 +284,9 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
             target = item.get("target_assumptions", {})
             values = item.get("recorded_target_inputs", {})
             related = item.get("source_target_learning", {})
+            computed_outputs = sum(
+                row.get("kind") == "requested_output" and row.get("status") == "calculated_up_to_date"
+                for row in item.get("calculation_steps", {}).get("steps", ()))
             print(f"Research verdict: {item['unit']} gain={item['gain']:.6g} stop={item['stop']} "
                   f"evaluated={item['evaluated']} calls={item['model_calls']} "
                   f"goal={item.get('global_goal_score', 0):.4f} "
@@ -291,8 +294,8 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
                   f"values_found={values.get('recorded', 0)}/{values.get('required', 0)} "
                   f"reviewed_inputs={target.get('fulfilled', 0)}/{target.get('required', 0)} "
                   f"related_target_needs={related.get('covered', 0)}/{related.get('required', 0)} "
-                  f"outputs={item.get('computed_outputs', 0)}/{item.get('requested_outputs', 0)} "
-                  f"issues={item['issues'][:2]}", file=sys.stderr, flush=True)
+                  f"outputs={computed_outputs}/{item.get('requested_outputs', 0)} "
+                  f"operation_status={item['operation_status']}", file=sys.stderr, flush=True)
 
     def relation_event(item):
         if showing_progress():

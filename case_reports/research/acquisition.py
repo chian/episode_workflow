@@ -129,7 +129,6 @@ class StrategySource(ResearchSource):
         return replace(result, source_event_types=tuple({"type_id": key, **group}
                                                         for key, group in groups.items()),
                        source_target_relationships=tuple(relationships.values()),
-                       issues=(*result.issues, *(failure.issues if failure else ())),
                        diagnostics=(*result.diagnostics, *(failure.diagnostics if failure else ())))
 
     def propose(self, view):
@@ -456,7 +455,7 @@ class ReadingSource(ResearchSource):
                 try:
                     self.validate_memory(proposed_memory, {**self.seen_spans, **allowed})
                 except ValueError as exc:
-                    memory_diagnostics.append({"stage": "reading_memory", "category": "invalid_memory",
+                    memory_diagnostics.append({"stage": "reading_memory", "category": "invalid_memory", "status": "not_applied",
                                                "why": str(exc), "source": self.document.source})
                     proposed_memory = self.memory
             return response
@@ -466,8 +465,9 @@ class ReadingSource(ResearchSource):
             result = extract_and_admit(agent, text="\n".join(s.text for s in spans),
                 source=self.document.source, objective=str(self.goal.objective),
                 context=self.context(), question=question,
-                feedback=(*communication["findings"], *communication["uncertainties"],
-                          *(f"{failure['meaning']} Limits: {failure['not_established']}" for failure in communication["failures"])),
+                feedback=(*communication["findings"],
+                          *(f"{failure.get('stage', 'operation')}: {failure['why']}"
+                            for failure in communication["unprocessed_diagnostics"])),
                 source_spans={k: s.text for k, s in allowed.items()}, source_version=self.document.sha256)
         except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
             result = self.failure_result(exc, "source_reading")
@@ -482,8 +482,7 @@ class ReadingSource(ResearchSource):
             "diagnostic_categories": sorted({d.get("category", "unknown") for d in result.diagnostics}),
         }))
         if memory_diagnostics:
-            result = replace(result, diagnostics=(*result.diagnostics, *memory_diagnostics),
-                             issues=(*result.issues, *(f"Reading memory not updated: {d['why']}" for d in memory_diagnostics)))
+            result = replace(result, diagnostics=(*result.diagnostics, *memory_diagnostics))
         if result.evaluated:
             self.pending_spans, self.pending_memory = spans, proposed_memory
             self.seen_spans.update(allowed)

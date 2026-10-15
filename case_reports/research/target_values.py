@@ -59,7 +59,7 @@ def _source_value_lineage(ledger, fact, invalid, visiting=frozenset()):
     for record in reversed(producers):
         output = record.get("output", {}).get(fact.field,
                      record.get("derived_parameters", {}).get(fact.field, {}))
-        if (record.get("issues") or output.get("value") != fact.value
+        if (output.get("value") != fact.value
                 or output.get("unit", UNITS.get(fact.field)) != fact.unit):
             continue
         dependency = record.get("derived_support", {}).get(fact.field,
@@ -90,7 +90,7 @@ def _source_value_lineage(ledger, fact, invalid, visiting=frozenset()):
                      "inputs": [item.semantic_record() for item in selected],
                      "output": {"field": fact.field, "value": fact.value, "unit": fact.unit},
                      "model_review": record.get("model_review", {}),
-                     "support_issues": record.get("support_issues", [])}]}
+                     "support_complete": record.get("support_complete", False)}]}
     return None
 
 
@@ -140,7 +140,7 @@ def relevance_profile_version(profile):
     def premises(value):
         if isinstance(value, dict):
             return {key: premises(item) for key, item in value.items()
-                    if key not in {"review", "model_review", "reasonableness", "support_issues"}}
+                    if key not in {"review", "model_review", "reasonableness", "support_complete"}}
         if isinstance(value, (list, tuple)):
             return [premises(item) for item in value]
         return value

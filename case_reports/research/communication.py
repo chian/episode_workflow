@@ -105,8 +105,9 @@ def diagnostic_options(diagnostics, retained=()):
 
 
 def decision_diagnostics(diagnostics):
-    return (d for d in diagnostics if not (
-        d.get("stage") == "assumption_assessment" and d.get("category") in {"supported", "provisional"}))
+    # A completed scientific judgment, including unsupported or contradicted,
+    # is reported on its claim. It is not an unsuccessful operation.
+    return (d for d in diagnostics if d.get("stage") != "assumption_assessment")
 
 
 def compact_assumption(assessment):

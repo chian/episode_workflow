@@ -181,9 +181,9 @@ class TargetValueTests(unittest.TestCase):
             reference, chosen = next((key, option) for key, option in options.items()
                 if option.subject == subject and option.field == fact.field
                 and option.parents and option.parents[0] == automatic["key"])
-            support, issues, invalid = support_for(self.ledger, (chosen,), {}, subject)
+            support, support_complete, invalid = support_for(self.ledger, (chosen,), {}, subject)
             self.assertEqual(set(support), {automatic["key"]})
-            self.assertEqual((issues, invalid), ([], []))
+            self.assertEqual((support_complete, invalid), (True, []))
             result = execute_tool({"action": "calculate_geometry_and_removal", "subject": subject,
                 "metrics": [],
                 "conditions": {"stokes_particles": "Small spherical particles in the Stokes regime."},
@@ -206,10 +206,10 @@ class TargetValueTests(unittest.TestCase):
         self.assertFalse(any(option.parents and option.parents[0] == automatic["key"]
                              for option in numeric_references(self.ledger).values()))
         for old in old_options:
-            support, issues, invalid = support_for(self.ledger, (old,), {}, old.subject)
+            support, support_complete, invalid = support_for(self.ledger, (old,), {}, old.subject)
             self.assertEqual(support, {})
             self.assertEqual(invalid, [automatic["key"]])
-            self.assertTrue(issues)
+            self.assertFalse(support_complete)
 
     def test_nonparent_fact_keeps_existing_matching_support_fallback(self):
         fact = self.fact()
@@ -217,9 +217,9 @@ class TargetValueTests(unittest.TestCase):
         automatic = self.project().assumptions[0]
         legacy = Fact(automatic["subject"], fact.field, fact.value, fact.unit,
                       "user_assumption", "Legacy input without explicit parent.")
-        support, issues, invalid = support_for(self.ledger, (legacy,), {}, legacy.subject)
+        support, support_complete, invalid = support_for(self.ledger, (legacy,), {}, legacy.subject)
         self.assertEqual(set(support), {automatic["key"]})
-        self.assertEqual((issues, invalid), ([], []))
+        self.assertEqual((support_complete, invalid), (True, []))
 
     def test_partial_source_invalidation_does_not_reappear_on_next_projection(self):
         first, second = self.fact(), self.fact(source="https://example.org/two")

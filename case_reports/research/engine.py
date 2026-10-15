@@ -413,8 +413,8 @@ class ResearchSource:
         self.last_proposal = None
         self.information_assessment = []
         self.evidence_handoff_baseline = None
-        self.decision_summary = {"findings": [], "uncertainties": [], "failures": []}
-        self.communicated = {"findings": set(self.initial.findings), "issues": set(self.initial.issues),
+        self.decision_summary = {"findings": []}
+        self.communicated = {"findings": set(self.initial.findings),
                              "diagnostics": {identity(d) for d in self.initial.diagnostics}}
 
     def contract(self, decision, *, subjects=(), meaning=None, deliverable="source_findings", parameter=None,
@@ -435,7 +435,7 @@ class ResearchSource:
         reason = self.cooperative_return_reason or self.failure or (record.controller_state.reason if record.ended_by == "yield_stop" else record.ended_by)
         if self.failure and self.completion_diagnostic is None:
             self.completion_diagnostic = self.run.identify_diagnostic({
-                "stage": "episode_completion",
+                "stage": "episode_completion", "status": "failed",
                 "category": "provider_usage_limit" if "provider_usage_limit" in reason else "source_termination",
                 "why": reason,
                 "requested_fields": list(self.focus),
@@ -455,7 +455,6 @@ class ResearchSource:
             self.decision_summary["findings"].append(
                 contribution.episode_update.report.as_record()["findings"])
         if self.pending is not None:
-            new_issues = [v for v in self.pending.issues if v not in self.ledger.issues]
             new_diagnostics = [d for d in self.pending.diagnostics if d not in self.ledger.diagnostics]
             self.ledger.merge(self.pending)
             before_goal = self.run.global_goal.preview()
@@ -538,7 +537,8 @@ class ResearchSource:
             if self.run.providers.event:
                 self.run.providers.event({"unit": unit.label, "evaluated": self.pending.evaluated,
                     "admitted_facts": len(self.pending.facts), "estimates": len(self.pending.estimates),
-                    "issues": new_issues, "gain": view.controller_step.gain,
+                    "operation_status": "completed" if self.pending.evaluated else "failed",
+                    "gain": view.controller_step.gain,
                     "stop": view.controller_step.stop, "model_calls": self.run.model_calls,
                     "global_goal_score": global_status["weighted_score"],
                     "root_credit_projection": root_projection,
@@ -553,7 +553,9 @@ class ResearchSource:
                 unit=unit.label, evaluated=self.pending.evaluated, gain=view.controller_step.gain,
                 score=view.controller_step.score, stop=view.controller_step.stop,
                 parameter=self.parameter, parameter_evidence=self.information_assessment,
-                model_calls=self.run.model_calls, issues=new_issues, diagnostics=new_diagnostics)
+                model_calls=self.run.model_calls,
+                operation_status="completed" if self.pending.evaluated else "failed",
+                diagnostics=new_diagnostics)
             self.pending = None
             self.pending_global = None
 
@@ -731,7 +733,8 @@ class ResearchSource:
                     or not report["findings"].strip()):
                 raise ValueError("Child synthesis must contain only a brief findings paragraph")
         except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
-            diagnostic = self.run.identify_diagnostic({"stage": "synthesis", **self.run.model_diagnostic(exc)})
+            diagnostic = self.run.identify_diagnostic({"stage": "synthesis", "status": "failed",
+                                                       **self.run.model_diagnostic(exc)})
             if self.pending is not None:
                 self.pending = replace(self.pending, diagnostics=(*self.pending.diagnostics, diagnostic))
             report = {"findings": "The child returned, but its steering synthesis could not be completed. "
@@ -739,7 +742,6 @@ class ResearchSource:
                       "from this communication failure."}
         for state in (self.ledger.result(), result):
             self.communicated["findings"].update(state.findings)
-            self.communicated["issues"].update(state.issues)
             self.communicated["diagnostics"].update(identity(d) for d in state.diagnostics)
         return report
 
@@ -796,16 +798,12 @@ class ResearchSource:
     def communication_context(self):
         return {"findings": list(dict.fromkeys([*self.decision_summary["findings"],
                     *(f for f in self.ledger.findings if f not in self.communicated["findings"])])),
-                "uncertainties": list(dict.fromkeys([*self.decision_summary["uncertainties"],
-                    *(v for v in self.ledger.issues if v not in self.communicated["issues"])])),
-                "failures": self.decision_summary["failures"],
                 "unprocessed_diagnostics": condensed_diagnostics(decision_diagnostics(
                     d for d in self.ledger.diagnostics if identity(d) not in self.communicated["diagnostics"]))}
 
     def failure_result(self, exc, stage):
-        issue = f"{stage} failed: {type(exc).__name__}: {exc}"
-        return ResearchResult(issues=(issue,), evaluated=False, diagnostics=({
-            "stage": stage, **self.run.model_diagnostic(exc),
+        return ResearchResult(evaluated=False, diagnostics=({
+            "stage": stage, "status": "failed", **self.run.model_diagnostic(exc),
             "requested_fields": list(self.focus),
             "question": self.parent_contract.decision if self.parent_contract else str(self.goal.objective) if self.goal else "",
             "proposal": diagnostic_value(self.last_proposal),
@@ -825,8 +823,6 @@ class ResearchSource:
     def next(self, view):
         if self.run.provider_unavailable is not None:
             self.failure = "provider_usage_limit_not_scientific_convergence"
-            if self.failure not in self.ledger.issues:
-                self.ledger.issues.append(self.failure)
             return SourceEnd("source_failed")
         if self.failure:
             return SourceEnd("source_failed")
@@ -868,8 +864,6 @@ class ResearchSource:
                 "requested_outputs": global_status["requested_outputs"],
                 "meaning": "Current shared Goal projection, updated after each child verdict before its return. One calculation_steps table contains requested outputs and intermediates, their computed values and units, status, credit, and readiness. Rows use calculation_steps.columns; note_ids indexes calculation_steps.notes. Root and investigation receive the table; acquisition children receive its counts and credit. The three statuses are not_calculated, calculated_up_to_date, and calculated_needs_updating. Target calculations automatically use the current main-table values, fixed inputs, retained defaults and current computed inputs. Calculation requests do not select numeric alternatives. Status describes numerical execution and whether the used inputs match the current main table; credit and review are separate. Notes explain changed dependencies or why completed arithmetic earns zero credit, including its review status. A row's ready_to_recalculate flag describes availability of main-table inputs and model conditions. The episode determines which operation to run. A previously successful calculation retains only its method credit while its numerical result is obsolete. Recorded target values include conditional hypotheses before independent review; target_assumptions counts supported or provisional reviews. Route counts describe input availability, not completed calculations."},
             "own_findings": [f for f in self.ledger.findings if f not in self.communicated["findings"]],
-            "own_unresolved": communication["uncertainties"],
-            "failure_implications": communication["failures"],
             "attempt_diagnostics": communication["unprocessed_diagnostics"],
             "parameter_progress": [{"field": row["field"], "points": row["points"],
                                     "alternative_values": len(row["alternatives"])}

@@ -265,7 +265,8 @@ class SourceValueHandoffTests(unittest.TestCase):
                 self.assertTrue(source.ledger.source_event_types)
                 self.assertEqual(len(classified), 1)
                 self.assertEqual(len(graded), 1)
-                self.assertFalse(source.ledger.issues)
+                self.assertFalse(any(row.get("status") == "failed"
+                                     for row in source.ledger.diagnostics))
                 self.assertEqual(run.global_goal.preview()["recorded_target_inputs"]["recorded"], 0)
 
     def test_local_classification_preserves_central_value_grades_and_other_fields(self):

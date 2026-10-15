@@ -129,7 +129,7 @@ class DerivedTargetValueTests(unittest.TestCase):
         lineage = derived_request["source_profile"]["derivation"]
         self.assertEqual(len(lineage["sources"]), 2)
         self.assertEqual(lineage["calculations"][0]["operator"], "cq_from_emission")
-        self.assertTrue(lineage["calculations"][0]["support_issues"])
+        self.assertFalse(lineage["calculations"][0]["support_complete"])
         self.assertIn("Conditional concentration", lineage["calculations"][0]["basis"])
 
     def test_invalid_upstream_withdraws_derived_candidate_and_downstream_premise(self):
@@ -193,16 +193,26 @@ class DerivedTargetValueTests(unittest.TestCase):
                 self.assertAlmostEqual(group["value"], 48.06060606060606)
                 self.assertEqual(current_support(record, ledger.assumptions, ledger=ledger), 0)
 
-    def test_failed_or_inconsistent_output_never_becomes_target_candidate(self):
-        for problem in ({"issues": ["Numeric equation failed"]},
-                        {"output": {FIELD: {"value": 999, "unit": UNITS[FIELD]}}}):
-            with self.subTest(problem=problem):
-                ledger, _ = fixture()
-                result = calculate(ledger)
-                ledger.merge(replace(result, calculations=({**result.calculations[0], **problem},)))
-                status = project(ledger)
-                group = next(row for row in status["independent_target_values"] if row["parameter"] == FIELD)
-                self.assertFalse(group["found"])
+    def test_failed_calculation_returns_no_numeric_record_or_target_candidate(self):
+        ledger, facts = fixture()
+        ledger.facts.pop(facts[0].key)
+        ledger.merge(ResearchResult(facts=(replace(facts[0], value=0),)))
+        with self.assertRaises((ValueError, ArithmeticError)):
+            calculate(ledger)
+        self.assertFalse(ledger.calculations)
+        self.assertFalse(any(fact.kind == "derived" for fact in ledger.facts.values()))
+        status = project(ledger)
+        group = next(row for row in status["independent_target_values"] if row["parameter"] == FIELD)
+        self.assertFalse(group["found"])
+
+    def test_inconsistent_output_never_becomes_target_candidate(self):
+        ledger, _ = fixture()
+        result = calculate(ledger)
+        record = {**result.calculations[0], "output": {FIELD: {"value": 999, "unit": UNITS[FIELD]}}}
+        ledger.merge(replace(result, calculations=(record,)))
+        status = project(ledger)
+        group = next(row for row in status["independent_target_values"] if row["parameter"] == FIELD)
+        self.assertFalse(group["found"])
 
     def test_production_noul_preserves_conditional_derivation_and_source_evidence(self):
         from episodic_workflow.configured_providers import WorkflowProviderConfig, firecrawl_argo_research_providers

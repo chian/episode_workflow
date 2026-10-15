@@ -6,7 +6,7 @@ from episodic_workflow.case_reports.research.calculation_steps import calculatio
 from episodic_workflow.case_reports.research.engine import ResearchLimits, ResearchProviders, ResearchRun
 from episodic_workflow.case_reports.research.goal_state import scientific_goal_status
 from episodic_workflow.case_reports.research.model_defaults import initialize_model_defaults
-from episodic_workflow.case_reports.research.records import Fact, Ledger, ResearchResult, numeric_references
+from episodic_workflow.case_reports.research.records import Fact, Ledger, ResearchResult, identity, numeric_references
 from episodic_workflow.case_reports.research.relevance import assess_numeric_target_relationships
 from episodic_workflow.case_reports.research.scenario_sharing import initialize_parameter_scope
 from episodic_workflow.case_reports.research.scenarios import initial_scenarios, load_scenarios
@@ -53,6 +53,55 @@ def action(ledger):
 
 
 class MainTableCalculationTests(unittest.TestCase):
+    def test_reused_settling_ignores_unrelated_shared_claim_review_refresh(self):
+        ledger = fixture()
+        origin = next(row["subject"] for row in ledger.assumptions.values() if row["field"] == CQ)
+        subject = next(subject for subject in ledger.scenarios if subject != origin)
+
+        def add_values(values):
+            ledger.merge(ResearchResult(facts=tuple(Fact("source context", field, value, UNITS[field],
+                "source_model_parameter", "Source parameter for dependency regression",
+                source="https://example.test/removal", quote=f"{field}={value}",
+                context="The source parameter's physical context") for field, value in values)))
+            ledger.merge(assess_numeric_target_relationships(ledger,
+                lambda request: {target: .9 for target in request["target_scenarios"]}))
+            ledger.merge(project_source_target_values(ledger))
+
+        def calculate(metrics, conditions=None):
+            result = execute_tool({"action": "calculate_geometry_and_removal", "subject": subject,
+                "metrics": metrics, "conditions": conditions or {}, "basis": "Reuse actual upstream arithmetic",
+                "parameterization": "removal chain"}, ledger, DEFAULT_METRICS, review=REVIEW)
+            ledger.merge(result)
+            return result.calculations[0]
+
+        calculate([])
+        add_values((("effective_radius_m", 1e-6),))
+        settling = calculate(["settling_speed_m_s"], {"stokes_particles": "Spherical low-Reynolds-number particles"})
+        self.assertNotIn(CQ, settling["derived_support"]["settling_speed_m_s"]["input_fields"])
+        add_values((("deactivation_rate_s", .000175), ("filter_efficiency", 0),
+                    ("recirculation_flow_m3_s", 0)))
+        concentration = next(row for row in ledger.assumptions.values() if row["field"] == CQ)
+        self.assertNotEqual(concentration["subject"], subject, "Exercise an actual shared input")
+        concentration["version"] = identity([concentration["version"], "Same claim, refreshed evidence review"])
+        removal = calculate(["removal_rate_s"])
+        for field in ("removal_capacity_m3_s", "removal_rate_s"):
+            dependency = removal["derived_support"][field]
+            self.assertNotIn(concentration["key"], {link["assumption_key"]
+                             for link in dependency["scenario_parameter_links"]})
+        selected = {row["field"]: row for row in calculation_step_status(ledger.result(), DEFAULT_METRICS)["steps"]
+                    if row["subject"] == subject}
+        for field in ("settling_speed_m_s", "removal_capacity_m3_s", "removal_rate_s"):
+            self.assertEqual(selected[field]["status"], "calculated_up_to_date")
+            self.assertEqual(selected[field]["points"], .125)
+            self.assertTrue(selected[field]["matches_main_selection"])
+        # Actual upstream changes still invalidate both the reused value and its consequences.
+        ledger.scenarios[subject]["model_defaults"]["air_dynamic_viscosity_pa_s"]["decision"] = "revisit"
+        stale = {row["field"]: row for row in calculation_step_status(ledger.result(), DEFAULT_METRICS)["steps"]
+                 if row["subject"] == subject}
+        for field in ("settling_speed_m_s", "removal_capacity_m3_s", "removal_rate_s"):
+            self.assertEqual(stale[field]["status"], "calculated_needs_updating")
+            self.assertEqual(stale[field]["points"], .025)
+
     def test_hidden_lower_relevance_reference_cannot_override_arithmetic_or_current_credit(self):
         ledger = fixture()
         proposal = action(ledger)

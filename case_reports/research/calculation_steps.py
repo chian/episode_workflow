@@ -101,8 +101,6 @@ def _requirements(field, numeric, conditions, options, variables=()):
 
 
 def _numerically_completed(record, field, *, derived):
-    if record.get("issues"):
-        return False
     if derived:
         if field not in record.get("derived_support", {}):
             return False

@@ -203,7 +203,7 @@ def current_support(record, assessments, *, metric=None, ledger=None):
         return current_support(dependency, assessments, ledger=ledger)
     if not current_scenario_links(record, ledger):
         return 0.0
-    if record.get("support_issues"):
+    if not record.get("support_complete", True):
         return 0.0
     versions = record.get("assumption_versions", {})
     keys = record.get("assumption_keys", versions)
@@ -433,7 +433,6 @@ class ResearchResult(ClosedRecord):
     facts: tuple[Fact, ...] = ()
     estimates: tuple[Mapping[str, Any], ...] = ()
     findings: tuple[str, ...] = ()
-    issues: tuple[str, ...] = ()
     evaluated: bool = True
     stop_reason: str = ""
     evidence: tuple[Mapping[str, Any], ...] = ()
@@ -449,7 +448,7 @@ class ResearchResult(ClosedRecord):
     def as_record(self):
         return {"facts": [f.as_record() for f in self.facts],
                 "estimates": list(self.estimates), "findings": list(self.findings),
-                "issues": list(self.issues), "evaluated": self.evaluated,
+                "evaluated": self.evaluated,
                 "stop_reason": self.stop_reason, "evidence": list(self.evidence),
                 "assumptions": list(self.assumptions), "scenarios": list(self.scenarios),
                 "diagnostics": list(self.diagnostics), "calculations": list(self.calculations),
@@ -472,8 +471,8 @@ class ResearchResult(ClosedRecord):
     def synthesis(self):
         return {"evidence": [f.semantic_record() for f in self.facts],
                 "estimates": [{"subject": e["subject"], "label": e["label"],
-                               "metrics": e["metrics"], "issues": e["issues"]} for e in self.estimates],
-                "findings": list(self.findings), "unresolved": list(self.issues),
+                               "metrics": e["metrics"]} for e in self.estimates],
+                "findings": list(self.findings),
                 "completion": self.stop_reason, "assumptions": [{k: v for k, v in a.items() if k != "key"} for a in self.assumptions],
                 "qualitative_evidence": list(self.evidence), "scenarios": list(self.scenarios),
                 "diagnostics": list(self.diagnostics), "reading_attempts": list(self.reading_attempts),
@@ -490,7 +489,6 @@ class Ledger:
         self.facts = {}
         self.estimates = {}
         self.findings = []
-        self.issues = []
         self.evidence = {}
         self.assumptions = {}
         self.scenarios = {}
@@ -536,7 +534,6 @@ class Ledger:
                                                                 *estimate.get("calculation_versions", ())]))}
             self.estimates[key] = estimate
         self.findings.extend(v for v in result.findings if v not in self.findings)
-        self.issues.extend(v for v in result.issues if v not in self.issues)
         self.evidence.update((identity(e), e) for e in result.evidence)
         self.assumptions.update((a["key"], a) for a in result.assumptions)
         self.scenarios.update((s["subject"], s) for s in result.scenarios)
@@ -569,7 +566,7 @@ class Ledger:
 
     def result(self, **kwargs):
         return ResearchResult(tuple(self.facts.values()), tuple(self.estimates.values()),
-                              tuple(self.findings), tuple(self.issues), evidence=tuple(self.evidence.values()),
+                              tuple(self.findings), evidence=tuple(self.evidence.values()),
                               assumptions=tuple(self.assumptions.values()), scenarios=tuple(self.scenarios.values()),
                               diagnostics=tuple(self.diagnostics), calculations=tuple(self.calculations.values()),
                               reading_attempts=tuple(self.reading_attempts.values()),
@@ -590,7 +587,7 @@ def compatible_estimates(left, right):
                 background = row["background"]
                 if model_ids.setdefault(background, row["model_id"]) != row["model_id"]:
                     return None
-    if (left.get("support_issues", []) != right.get("support_issues", []) or
+    if (left.get("support_complete", True) != right.get("support_complete", True) or
             left.get("model_review", {}).get("admit", True) != right.get("model_review", {}).get("admit", True) or
             left.get("model_review", {}).get("completed", True) != right.get("model_review", {}).get("completed", True)):
         return None
@@ -606,8 +603,9 @@ def compatible_estimates(left, right):
     parameters = {**left["parameters"], **right["parameters"]}
     conditions = {**left["conditions"], **right["conditions"]}
     from ...task_executors.scenario_metrics.evaluate import evaluate_parameters
-    check = evaluate_parameters(parameters, conditions, (), subject=left["subject"], label=left["label"])
-    if check["issues"]:
+    try:
+        evaluate_parameters(parameters, conditions, (), subject=left["subject"], label=left["label"])
+    except ValueError:
         return None
     support = {a["key"]: a for a in (*left.get("assumption_support", ()), *right.get("assumption_support", ()))}
     return {**left, **right, "parameters": parameters, "conditions": conditions,
@@ -634,5 +632,4 @@ def compatible_estimates(left, right):
                                                              *right.get("invalidated_dependencies", ())])),
             "assumption_support": list(support.values()),
             "reasonableness": min(left.get("reasonableness", 0), right.get("reasonableness", 0)),
-            "calculation_versions": list(dict.fromkeys([*left.get("calculation_versions", ()), *right.get("calculation_versions", ())])),
-            "issues": list(dict.fromkeys([*left.get("issues", ()), *right.get("issues", ())]))}
+            "calculation_versions": list(dict.fromkeys([*left.get("calculation_versions", ()), *right.get("calculation_versions", ())]))}

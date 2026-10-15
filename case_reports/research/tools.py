@@ -115,10 +115,11 @@ def support_for(ledger, facts, conditions, subject):
     """Describe support gaps without preventing a conditional calculation."""
     selected = {}
     visiting = set()
-    issues = []
+    complete = True
     invalidated = []
 
-    def require(fact):
+    def require(fact, recorded_links=()):
+        nonlocal complete
         if fact.key in visiting:
             raise ValueError("Cyclic parameter provenance")
         if fact.kind == "model_assumption" and fact.parents:
@@ -130,7 +131,12 @@ def support_for(ledger, facts, conditions, subject):
                       and parent["subject"] == fact.subject
                       and parent["statement"] == fact.context)
             shared = (len(fact.parents) == 2 and any(
-                a["key"] == key and identity(relation) == fact.parents[1]
+                a["key"] == key and (identity(relation) == fact.parents[1] or any(
+                    link.get("assumption_key") == key
+                    and link.get("target_subject") == fact.subject
+                    and link.get("relation_version") == fact.parents[1]
+                    and current_scenario_links({"scenario_parameter_links": [link]}, ledger)
+                    for link in recorded_links))
                 and fact.context == f"Shared from {a['subject']}: {a['statement']}"
                 for a, relation in shared_assumptions(ledger, fact.subject)))
             if (parent is not None and not parent.get("source_candidate_unavailable")
@@ -138,7 +144,7 @@ def support_for(ledger, facts, conditions, subject):
                     and parent["value"] == fact.value and parent["unit"] == fact.unit):
                 selected[key] = parent
             else:
-                issues.append(f"Selected hypothesis for {fact.field} is unavailable or its claim changed")
+                complete = False
                 invalidated.append(key)
             return
         matches = [a for a in ledger.assumptions.values() if a["subject"] == fact.subject
@@ -150,7 +156,7 @@ def support_for(ledger, facts, conditions, subject):
             return
         derivations = [c for c in ledger.calculations.values() if fact.key in c.get("output_fact_keys", ())]
         if fact.kind != "derived" or not derivations:
-            issues.append(f"Parameter {fact.field} has no completed reasonableness assessment")
+            complete = False
             return
         calculation = derivations[-1]
         if not calculation.get("model_review", {}).get("completed", True):
@@ -161,20 +167,20 @@ def support_for(ledger, facts, conditions, subject):
             if completed:
                 calculation = completed[-1]
         if calculation.get("operator") == "transfer_parameter":
-            issues.append(f"Transferred {fact.field} has not been assessed in its target scenario")
+            complete = False
         dependency = calculation.get("derived_support", {}).get(fact.field, calculation)
-        issues.extend(dependency.get("support_issues", ()))
+        complete = complete and dependency.get("support_complete", True)
         invalidated.extend(dependency.get("invalidated_dependencies", ()))
         if not current_scenario_links(dependency, ledger):
-            issues.append(f"Derived {fact.field} depends on changed scenario inputs, constants or sharing")
+            complete = False
             invalidated.append(calculation["version"])
         if (not calculation.get("model_review", {}).get("admit", True)
                 or not calculation.get("model_review", {}).get("completed", True)):
-            issues.append(f"Derived {fact.field}: {calculation['model_review']['reason']}")
+            complete = False
         for key in dependency["assumption_versions"]:
             current = ledger.assumptions.get(key, {})
             if not assumption_matches(dependency, key, current):
-                issues.append(f"Derived {fact.field} depends on a changed assumption claim or an unavailable assessment")
+                complete = False
                 invalidated.append(key)
             if current:
                 selected[key] = current
@@ -186,9 +192,9 @@ def support_for(ledger, facts, conditions, subject):
         inputs.update(ledger.facts)
         for key in dependency["input_fact_keys"]:
             if key in inputs:
-                require(inputs[key])
+                require(inputs[key], dependency.get("scenario_parameter_links", ()))
             else:
-                issues.append(f"Derived {fact.field} refers to an input no longer in the current catalog")
+                complete = False
                 invalidated.append(key)
         visiting.remove(fact.key)
 
@@ -198,11 +204,11 @@ def support_for(ledger, facts, conditions, subject):
         matches = [a for a in ledger.assumptions.values() if a["subject"] == subject
                    and a["field"] == field and a["statement"] == statement]
         if not matches:
-            issues.append(f"Condition {field} has no completed reasonableness assessment")
+            complete = False
             continue
         a = max(matches, key=lambda a: a["reasonableness"])
         selected[a["key"]] = a
-    return selected, list(dict.fromkeys(issues)), list(dict.fromkeys(invalidated))
+    return selected, complete, list(dict.fromkeys(invalidated))
 
 
 def scenario_parameter_links(facts, ledger=None):
@@ -227,14 +233,21 @@ def scenario_parameter_links(facts, ledger=None):
             for calculation in ledger.calculations.values():
                 if fact.key not in calculation.get("output_fact_keys", ()):
                     continue
-                for row in calculation.get("scenario_parameter_links", ()):
-                    links.append(row)
+                dependency = calculation.get("derived_support", {}).get(fact.field, calculation)
+                recorded_links = dependency.get("scenario_parameter_links", ())
+                links.extend(recorded_links)
                 records = {identity(row): Fact(**{**row, "parents": tuple(row.get("parents", ()))})
                            for row in calculation.get("input_records", ())}
                 records.update(ledger.facts)
-                for key in calculation.get("input_fact_keys", ()):
+                for key in dependency.get("input_fact_keys", ()):
                     if key in records:
-                        visit(records[key])
+                        parent = records[key]
+                        if parent.kind == "model_assumption" and len(parent.parents) == 2 and any(
+                                row.get("assumption_key") == parent.parents[0]
+                                and row.get("relation_version") == parent.parents[1]
+                                and row.get("target_subject") == parent.subject for row in recorded_links):
+                            continue
+                        visit(parent)
     for fact in facts:
         visit(fact)
     return list({identity(row): row for row in links}.values())
@@ -280,12 +293,10 @@ def output_support(estimate, field, facts, ledger, review, *, derived=False, sel
         selection = selected_target_snapshot(ledger)
     inputs, conditions = output_dependencies(estimate, field, derived=derived)
     selected = [fact for fact in facts if fact.field in inputs]
-    support, issues, invalidated = support_for(ledger, selected,
+    support, complete, invalidated = support_for(ledger, selected,
         {k: v for k, v in estimate["conditions"].items() if k in conditions}, estimate["subject"])
-    issues.extend(f"Required input {field} was not supplied" for field in inputs if field not in {f.field for f in selected})
-    issues.extend(f"Required condition {field} was not supplied" for field in conditions if field not in estimate["conditions"])
-    if not derived and estimate["metrics"][field].get("applicability_warning"):
-        issues.append(estimate["metrics"][field]["applicability_warning"])
+    complete = (complete and set(inputs) <= {f.field for f in selected}
+                and set(conditions) <= estimate["conditions"].keys())
     return {"input_fields": inputs, "condition_fields": conditions,
             "selected_target_bindings": selected_target_bindings(selected, selection),
             "input_fact_keys": [f.key for f in selected],
@@ -295,7 +306,7 @@ def output_support(estimate, field, facts, ledger, review, *, derived=False, sel
             "scenario_parameter_links": scenario_parameter_links(selected, ledger),
             "assumption_versions": {k: a["version"] for k, a in support.items()},
             "assumption_claims": {k: assumption_claim(a) for k, a in support.items()},
-            "support_issues": issues, "model_review": review, "invalidated_dependencies": invalidated}
+            "support_complete": complete, "model_review": review, "invalidated_dependencies": invalidated}
 
 
 def execute_tool(action, ledger, requested_metrics, *, review):
@@ -317,7 +328,7 @@ def execute_tool(action, ledger, requested_metrics, *, review):
     if name == "calibrate_infectiousness":
         required = derivation_inputs(action.get("operator"), {f.field: f.value for f in facts})
         facts = tuple(fact for fact in facts if fact.field in required)
-    support, support_issues, invalidated = support_for(ledger, facts, conditions, subject)
+    support, support_complete, invalidated = support_for(ledger, facts, conditions, subject)
     from .calculation_steps import selected_target_bindings, selected_target_snapshot
     selection = selected_target_snapshot(ledger)
     selection_bindings = selected_target_bindings(facts, selection)
@@ -327,7 +338,7 @@ def execute_tool(action, ledger, requested_metrics, *, review):
         calculation = calculation_record(name, subject, facts, support,
             {f.field: {"value": f.value, "unit": f.unit} for f in result.facts},
             conditions=conditions, basis=action["basis"], operator=action["operator"],
-            model_review=review, support_issues=support_issues,
+            model_review=review, support_complete=support_complete,
             selected_target_bindings=selection_bindings,
             scenario_input_bindings=scenario_input_bindings(facts, ledger),
             scenario_condition_bindings=scenario_condition_bindings(subject, conditions, ledger),
@@ -361,7 +372,7 @@ def execute_tool(action, ledger, requested_metrics, *, review):
                     selected_target_bindings=selection_bindings,
                     assumption_claims={k: assumption_claim(a) for k, a in support.items()},
                     assumption_support=list(support.values()),
-                    model_review=review, support_issues=support_issues, invalidated_dependencies=invalidated,
+                    model_review=review, support_complete=support_complete, invalidated_dependencies=invalidated,
                     scenario_input_bindings=scenario_input_bindings(facts, ledger),
                     scenario_condition_bindings=scenario_condition_bindings(subject, conditions, ledger),
                     scenario_parameter_links=scenario_parameter_links(facts, ledger))
@@ -372,22 +383,20 @@ def execute_tool(action, ledger, requested_metrics, *, review):
         field: output_support(intermediate_view, field, facts, ledger, review, selection=selection)
         for field in estimate["intermediate_outputs"]}
     estimate["reasonableness"] = current_support(estimate, ledger.assumptions, ledger=ledger)
-    derived = ()
-    if not estimate["issues"]:
-        derived = tuple(Fact(subject, field, row["value"], UNITS[field], "derived", row["formula"],
-                            context=action["basis"], parents=tuple(f.key for f in facts
-                                if f.field in output_dependencies(estimate, field, derived=True)[0]))
-                        for field, row in estimate["derived_parameters"].items())
+    derived = tuple(Fact(subject, field, row["value"], UNITS[field], "derived", row["formula"],
+                        context=action["basis"], parents=tuple(f.key for f in facts
+                            if f.field in output_dependencies(estimate, field, derived=True)[0]))
+                    for field, row in estimate["derived_parameters"].items())
     calculation = calculation_record(name, subject, facts, support, estimate["metrics"],
         conditions=conditions, basis=action["basis"], output_fact_keys=[f.key for f in derived],
-        model_review=review, support_issues=support_issues,
+        model_review=review, support_complete=support_complete,
         selected_target_bindings=selection_bindings,
         scenario_input_bindings=scenario_input_bindings(facts, ledger),
         scenario_condition_bindings=scenario_condition_bindings(subject, conditions, ledger),
         scenario_parameter_links=scenario_parameter_links(facts, ledger),
         invalidated_dependencies=invalidated,
         derived_parameters=estimate["derived_parameters"], parameterization=parameterization,
-        issues=estimate["issues"],
+        execution_status=estimate["execution_status"],
         calculation_variables=estimate["calculation_variables"],
         output_contracts=estimate["output_contracts"],
         metric_support=estimate["metric_support"],
@@ -396,11 +405,8 @@ def execute_tool(action, ledger, requested_metrics, *, review):
         derived_support={field: output_support(estimate, field, facts, ledger, review, derived=True, selection=selection)
                          for field in estimate["derived_parameters"]})
     estimate["calculation_versions"] = [calculation["version"]]
-    issues = tuple(dict.fromkeys([*support_issues, *estimate["issues"],
-        *(item for row in estimate["metrics"].values() for item in row.get("missing", [])),
-        *([f"Model support not established: {review['reason']}"] if not review["admit"] else [])]))
     return ResearchResult(facts=derived, estimates=(estimate,), calculations=(calculation,),
-                          findings=tuple(review.get("limitations", [])), issues=issues)
+                           findings=tuple(review.get("limitations", [])))
 
 
 def compare(action, ledger, review):
@@ -421,10 +427,10 @@ def compare(action, ledger, review):
     if row.get("status") != "calculated" or row.get("limit") != "finite":
         raise ValueError("Comparison requires a finite calculated prediction")
     dependency = prediction.get("metric_support", {}).get(metric, prediction)
-    support_issues = list(dependency.get("support_issues", ()))
+    support_complete = dependency.get("support_complete", True)
     if (not prediction.get("model_review", {}).get("admit", True)
             or not prediction.get("model_review", {}).get("completed", True)):
-        support_issues.append(f"Prediction model support not established: {prediction['model_review']['reason']}")
+        support_complete = False
     lineage, pending, calibration_subjects = set(), list(dependency["input_fact_keys"]), set()
     while pending:
         fact_key = pending.pop()
@@ -451,7 +457,7 @@ def compare(action, ledger, review):
                    "input_fact_keys": [*dependency["input_fact_keys"], observation.key],
                    "assumption_versions": dependency["assumption_versions"], "basis": action["basis"],
                    "assumption_claims": dependency.get("assumption_claims", {}),
-                   "model_review": review, "support_issues": support_issues}
+                   "model_review": review, "support_complete": support_complete}
     calculation["version"] = identity(calculation)
     return ResearchResult(calculations=(calculation,), findings=(
         f"{comparison['category']}: {metric} residual={comparison['residual']:.8g}. {review['reason']}",))
@@ -469,7 +475,7 @@ def tool_options(ledger):
                    "current_computed_metrics": [m for m in c["output"] if calculation_is_up_to_date(c, m, ledger)],
                   "metric_support": {m: current_support(c, ledger.assumptions, metric=m, ledger=ledger)
                                      for m in c.get("metric_support", {})},
-                  "model_review": c.get("model_review"), "support_issues": c.get("support_issues", []),
+                  "model_review": c.get("model_review"), "support_complete": c.get("support_complete", True),
                   "input_values": c.get("input_values", {}), "assumption_versions": c["assumption_versions"],
                   "interpretation": "Computed consequences, not observations. Current computed metrics may have zero evidence support. metric_support qualifies each output; "
                   "current_support describes all selected assumptions, including inputs unused by an individual output."}

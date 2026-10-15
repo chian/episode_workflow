@@ -227,7 +227,7 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
             "workflow requirements are not scientific evidence."
         ),
     })
-    candidates, issues, diagnostics = [], [], []
+    candidates, diagnostics = [], []
     rows = response.get("facts", [])
     if not isinstance(rows, list):
         raise ValueError("Extraction facts must be a list")
@@ -256,8 +256,7 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
             candidates.append((raw, fact))
         except (KeyError, TypeError, ValueError) as exc:
             field = raw.get("field", "unknown") if isinstance(raw, dict) else "unknown"
-            issues.append(f"Rejected extraction of {field}: {exc}")
-            diagnostics.append({"stage": "extraction", "category": "invalid_candidate", "source": source,
+            diagnostics.append({"stage": "extraction", "category": "invalid_candidate", "status": "rejected", "source": source,
                                 "field": field, "why": str(exc), "proposal": raw})
     qualitative = response.get("evidence", [])
     if not isinstance(qualitative, list):
@@ -286,8 +285,7 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
                         kind="request_constraint" if source == "request" else "source_evidence")
             candidates.append((raw, item))
         except (KeyError, TypeError, ValueError) as exc:
-            issues.append(f"Rejected qualitative evidence: {exc}")
-            diagnostics.append({"stage": "extraction", "category": "invalid_candidate", "source": source,
+            diagnostics.append({"stage": "extraction", "category": "invalid_candidate", "status": "rejected", "source": source,
                                 "why": str(exc), "proposal": raw})
     admitted, evidence = [], []
     if candidates:
@@ -360,8 +358,7 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
             else:
                 item = candidates[index][1]
                 field = item.field if isinstance(item, Fact) else item["claim"]
-                issues.append(f"Applicability rejected {field}: {decision['reason']}")
-                diagnostics.append({"stage": "applicability_review", "category": "rejected_evidence",
+                diagnostics.append({"stage": "applicability_review", "category": "rejected_evidence", "status": "rejected",
                                     "source": source, "claim": field, "why": decision["reason"],
                                     "proposal": candidates[index][0]})
     findings = response.get("findings", [])
@@ -370,6 +367,6 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
     if not rows and not qualitative:
         diagnostics.append({"stage": "extraction", "category": "no_relevant_evidence", "source": source,
                             "why": "The reading returned no relevant evidence", "findings": findings})
-    return ResearchResult(tuple(admitted), findings=tuple(findings), issues=tuple(issues),
+    return ResearchResult(tuple(admitted), findings=tuple(findings),
                           evidence=tuple(evidence), diagnostics=tuple(diagnostic_value(d) for d in diagnostics),
                           evaluated=not (rows or qualitative) or bool(candidates))

@@ -116,11 +116,10 @@ def calculation_leaf(source, proposal, staged, context):
         except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
             review_failure = source.failure_result(exc, "model_support_assessment")
             review = {"admit": False, "completed": False, "reason": "Model support assessment did not complete",
-                      "limitations": list(review_failure.issues)}
+                      "limitations": []}
         result = execute_tool(calculation_action, staged, source.run.metrics, review=review)
         if review_failure is not None:
-            result = replace(result, issues=(*result.issues, *review_failure.issues),
-                             diagnostics=(*result.diagnostics, *review_failure.diagnostics))
+            result = replace(result, diagnostics=(*result.diagnostics, *review_failure.diagnostics))
         staged.merge(result)
         return staged.result(evaluated=result.evaluated)
 

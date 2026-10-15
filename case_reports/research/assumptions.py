@@ -486,7 +486,7 @@ def assess_registered_candidates(agent, ledger, keys, context, on_failure, *,
     from .records import Ledger
 
     working = Ledger(ledger.result())
-    updates, facts, findings, diagnostics, issues = [], [], [], [], []
+    updates, facts, findings, diagnostics = [], [], [], []
     for key in dict.fromkeys(keys):
         candidate = working.assumptions.get(key)
         if (candidate is None or candidate.get("source_candidate_unavailable")
@@ -538,9 +538,8 @@ def assess_registered_candidates(agent, ledger, keys, context, on_failure, *,
                 "hypothesis_available": True} for row in reviewed.diagnostics))
         findings.extend(reviewed.findings)
         diagnostics.extend(reviewed.diagnostics)
-        issues.extend(reviewed.issues)
     return ResearchResult(facts=tuple(facts), assumptions=tuple(updates), findings=tuple(findings),
-                          diagnostics=tuple(diagnostics), issues=tuple(issues))
+                          diagnostics=tuple(diagnostics))
 
 
 def assess_selected_source_candidates(agent, ledger, facts, conditions, subject, context, on_failure):

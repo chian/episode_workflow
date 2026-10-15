@@ -143,7 +143,7 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
     for name, basis in conditions.items():
         if not isinstance(basis, str) or not basis.strip():
             raise ValueError(f"Named basis required for {name}")
-    values, outputs, issues = dict(parameters), {}, []
+    values, outputs = dict(parameters), {}
     derivations = {}
     dependencies = {k: {"input_fields": [k], "condition_fields": []} for k in parameters}
     metric_dependencies, derived_dependencies = {}, {}
@@ -163,9 +163,7 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
             answer = function(*(values[k] for k in inputs))
             if name in values:
                 if not math.isclose(answer, values[name], rel_tol=0.02, abs_tol=1e-12):
-                    issue = f"Inconsistent {name}: supplied={values[name]:.8g}, {formula}={answer:.8g}"
-                    if issue not in issues:
-                        issues.append(issue)
+                    raise ValueError(f"Inconsistent {name}: supplied={values[name]:.8g}, {formula}={answer:.8g}")
             else:
                 values[name] = answer
                 derivations[name] = {"inputs": list(inputs), "formula": formula, "value": answer}
@@ -180,11 +178,11 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
             break
     if "single_infectious_source" in conditions:
         if parameters.get("index_case_count", 1) != 1:
-            issues.append("The requested single-source model conflicts with index_case_count")
+            raise ValueError("The requested single-source model conflicts with index_case_count")
     if "susceptible_count" in values and "occupant_count" in values and values["susceptible_count"] > values["occupant_count"]-1:
-        issues.append("susceptible_count exceeds N-1")
+        raise ValueError("susceptible_count exceeds N-1")
     if {"continuous_unmasked_jet", "negligible_near_field"} <= set(conditions):
-        issues.append("Continuous-jet and negligible-near-field distance assumptions require separate parameterizations")
+        raise ValueError("Continuous-jet and negligible-near-field distance assumptions require separate parameterizations")
 
     def compute(name):
         if name in outputs:
@@ -199,12 +197,9 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
         row = {**m.as_record(), "value": None, "limit": None, "status": "missing_inputs", "missing": []}
         outputs[name] = row
         metric_dependencies[name] = trace(m.inputs, metric_conditions(name, regime=m.regime))
-        if issues:
-            row.update(status="inconsistent_inputs", missing=list(issues))
-            return row
-
         def exclude(reason, inputs):
             metric_dependencies[name] = trace(inputs)
+            row.pop("distance_outcome", None)
             row.update(status="inapplicable", missing=[], applicability={"reason": reason, "inputs": inputs})
             return row
 
@@ -271,9 +266,13 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
                     row["distance_outcome"] = ("no_finite_separation" if not math.isfinite(answer) else
                                                "no_positive_minimum" if answer == 0 else "finite_boundary")
                     if near_field == "jet" and 0 < answer < 0.1:
-                        row["applicability_warning"] = "The algebraic boundary is below the 0.1 m jet domain; it is not a validated near-mouth separation."
+                        row.update(value=None, limit=None)
+                        return exclude("The algebraic boundary is below the 0.1 m jet domain.",
+                                       {field: args[field] for field in inputs})
             if m.regime == "jet" and name in {"critical_distance_m", "risk_threshold_distance_m"} and 0 < answer < 0.1:
-                row["applicability_warning"] = "The inferred distance lies below the approximate jet virtual-origin scale; do not interpret it as a validated separation."
+                row.update(value=None, limit=None)
+                return exclude("The inferred distance lies below the 0.1 m jet domain.",
+                               {field: args[field] for field in inputs})
             values[name] = answer
             dependencies[name] = metric_dependencies[name]
             # Preserve computed canonical intermediates for reuse and dependency
@@ -295,6 +294,6 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
             "derived_dependencies": derived_dependencies,
             "conditions": dict(conditions), "input_provenance": provenance or {},
             "calculation_variables": list(variables),
-            "issues": issues,
+            "execution_status": "completed" if all(row["status"] == "calculated" for row in requested.values()) else "not_calculated",
             "interpretation": "Conditional model estimates; crossing a budget boundary is not a guarantee of safety.",
             "validation": "No independent validation is implied by solving or reusing a calibration equation."}
