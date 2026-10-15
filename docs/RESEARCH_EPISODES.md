@@ -131,10 +131,9 @@ model-call allocation. The post-V16 change removes `child_model_calls`, local
 call deadlines and resource-allocation context from the agent interfaces. V16's
 children almost always ended after one unit under those deadlines, before their
 own yield histories could govern iteration. Each child now continues through
-the existing method_loop controller, subject to source exhaustion, provider
-failure and the caller's whole-run operational ceilings. There is no per-episode
-unit cap. Whole-run ceilings remain runtime safeguards recorded in the audit, not agent
-choices or scientific convergence. Model attempts still distinguish proposal
+the existing method_loop controller, subject to source exhaustion and provider
+failure. There is no model-call, whole-run unit, or per-episode unit budget.
+Model attempts still distinguish proposal
 work from mandatory processing. Synthesis remains commissioned by the invoking
 parent. There is no cost term in credit and no prescribed action sequence.
 

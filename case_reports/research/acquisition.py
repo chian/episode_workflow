@@ -15,7 +15,7 @@ from .admission import extract_and_admit, exact_span
 from .assumptions import text as required_text
 from .documents import Document, Span, rank_spans
 from .communication import merged_ranges, reading_coverage
-from .engine import BudgetExceeded, ResearchSource, selected_choice
+from .engine import ResearchSource, selected_choice
 from .model_tiers import ModelTier, TABLE_PAGE_EXTRACTION_TIER
 from .records import Ledger, ResearchResult, identity
 from .relevance import (
@@ -81,6 +81,7 @@ class StrategySource(ResearchSource):
         failure = None
         jev_assessor = getattr(getattr(self.run, "providers", None), "source_target_assessor", None)
         for source in changed:
+            previous_relationships = tuple(row for key, row in relationships.items() if key[0] == source)
             for group in groups.values():
                 group["members"] = [member for member in group["members"] if member[0] != source]
             relationships = {key: row for key, row in relationships.items() if key[0] != source}
@@ -93,12 +94,14 @@ class StrategySource(ResearchSource):
                     if jev_assessor is not None:
                         decisions, assessed_relations = assess_source_types_with_jev(
                             self.run.complete, jev_assessor, source, batch, targets, groups,
-                            self.run.context.get("disease_of_interest"), parameter=self.parameter)
+                            self.run.context.get("disease_of_interest"), parameter=self.parameter,
+                            previous_relationships=previous_relationships)
                     else:
                         decisions, assessed_relations = assess_source_types(
                             self.run.complete, source, batch, targets, groups,
-                            self.run.context.get("disease_of_interest"), parameter=self.parameter)
-                except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+                            self.run.context.get("disease_of_interest"), parameter=self.parameter,
+                            previous_relationships=previous_relationships)
+                except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
                     failure = self.failure_result(exc, "source_event_relevance")
                     break
                 for decision in decisions:
@@ -240,7 +243,8 @@ class PageSource(ResearchSource):
             raise ValueError("Source retrieval returned no document text; this is not negative evidence")
         self.document = Document(locator, self.candidate.get("title", ""), text, self.run.limits.text_window_chars)
         version = {"text": text, "sha256_utf8": self.document.sha256,
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "retrieved_at": (self.run.providers.checkpoint.now()
+                if self.run.providers.checkpoint is not None else datetime.now(timezone.utc).isoformat()),
             "spans": [s.as_record() for s in self.document.spans],
             "tables": {t.key: t.summary() for t in self.document.tables}}
         versions = dict(self.run.documents.get(locator, {}).get("versions", {}))
@@ -414,7 +418,7 @@ class ReadingSource(ResearchSource):
                 feedback=(*communication["findings"], *communication["uncertainties"],
                           *(f"{failure['meaning']} Limits: {failure['not_established']}" for failure in communication["failures"])),
                 source_spans={k: s.text for k, s in allowed.items()}, source_version=self.document.sha256)
-        except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+        except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
             result = self.failure_result(exc, "source_reading")
         result = replace(result, reading_attempts=(*result.reading_attempts, {
             "source": self.document.source, "source_version": self.document.sha256,

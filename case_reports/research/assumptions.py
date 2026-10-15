@@ -6,7 +6,7 @@ The proposer cannot set its own credit or turn a conditional claim into evidence
 
 from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter, output_meets_contract
 from ...task_executors.scenario_metrics.catalog import METRICS
-from .records import Credit, Fact, ResearchResult, identity, assessment_summary, current_support, current_computation
+from .records import Credit, Fact, ResearchResult, identity, assessment_summary, assumption_claim, current_support, current_computation
 from .scenarios import check_case_inputs
 from .progress import parameter_support
 from .verification import CALIBRATION_PROGRESS, calibration_progress, target_calibration_progress
@@ -106,13 +106,86 @@ def assumption_candidate(action, ledger):
             raise ValueError("An assumption cannot override an admitted requester constraint")
     elif value is not None:
         raise ValueError("Model conditions use a statement, not a numeric value")
-    return {"subject": subject, "field": field, "value": value,
+    claim = {"subject": subject, "field": field, "value": value,
              "unit": UNITS.get(field, "condition"),
              "statement": text(action.get("statement"), "statement"),
              "basis": text(action.get("basis"), "basis")}
+    if action.get("entry_type") is not None:
+        if action["entry_type"] != "best_guess" or field not in UNITS:
+            raise ValueError("best_guess entries are inferred numeric parameters")
+        claim.update(entry_type="best_guess", derivation=_candidate_derivation(action, claim, ledger))
+    elif any(name in action for name in ("source_refs", "input_refs", "added_assumptions", "derivation")):
+        raise ValueError("Inference provenance requires entry_type=best_guess")
+    return claim
 
 
-def candidate_response_schema(*, scenarios=None):
+def _candidate_derivation(action, claim, ledger):
+    from .tools import input_options
+
+    evidence = ledger.evidence_options()
+    numeric = input_options(ledger)
+    evidence_ids = {identity(row) for row in evidence.values()}
+    numeric_keys = {fact.key: fact for fact in numeric.values()}
+    if "derivation" in action:
+        derivation = action["derivation"]
+        if not isinstance(derivation, dict) or set(derivation) != {
+                "source_evidence_ids", "input_fact_keys", "added_assumptions",
+                "input_assumption_versions", "input_assumption_claims"}:
+            raise ValueError("Invalid retained best-guess derivation")
+        sources = texts(derivation["source_evidence_ids"], "source_evidence_ids")
+        inputs = texts(derivation["input_fact_keys"], "input_fact_keys")
+        added = texts(derivation["added_assumptions"], "added_assumptions")
+    else:
+        sources = texts(action.get("source_refs"), "source_refs")
+        inputs = texts(action.get("input_refs"), "input_refs")
+        added = texts(action.get("added_assumptions"), "added_assumptions")
+        if any(ref not in evidence for ref in sources) or any(ref not in numeric for ref in inputs):
+            raise ValueError("Best-guess references must select this episode's admitted evidence or numeric inputs")
+        # Positional option names can move when a child adds source facts.
+        sources = [identity(evidence[ref]) for ref in sources]
+        inputs = [numeric[ref].key for ref in inputs]
+    if any(key not in evidence_ids for key in sources) or any(key not in numeric_keys for key in inputs):
+        raise ValueError("Best-guess provenance no longer identifies available evidence or numeric inputs")
+    claim_key = identity([claim["subject"], claim["field"], claim["value"], None])
+    versions, claims = {}, {}
+
+    def check_lineage(key, path):
+        if key == claim_key or key in path:
+            raise ValueError("A best guess cannot depend on itself or cyclic input lineage")
+        fact = numeric_keys.get(key)
+        assumption = ledger.assumptions.get(key)
+        if assumption is not None:
+            versions[key] = assumption["version"]
+            claims[key] = assumption_claim(assumption)
+        if fact is not None and fact.kind == "model_assumption" and fact.parents:
+            current = ledger.assumptions.get(fact.parents[0])
+            if current is not None:
+                expected_context = (current["statement"] if fact.subject == current["subject"] else
+                                    f"Shared from {current['subject']}: {current['statement']}")
+                if (fact.field != current["field"] or fact.value != current["value"]
+                        or fact.unit != current["unit"] or fact.context != expected_context):
+                    raise ValueError("Best-guess input refers to a changed assumption claim")
+        parents = (fact.parents if fact is not None else
+                   assumption.get("derivation", {}).get("input_fact_keys", ()) if assumption else ())
+        for parent in parents:
+            check_lineage(parent, {*path, key})
+
+    for key in inputs:
+        check_lineage(key, set())
+    if "derivation" in action:
+        prior_versions, prior_claims = derivation["input_assumption_versions"], derivation["input_assumption_claims"]
+        if (not isinstance(prior_versions, dict) or not isinstance(prior_claims, dict)
+                or set(prior_versions) != set(versions) or prior_claims != claims
+                or any(not isinstance(value, str) or not value for value in prior_versions.values())):
+            raise ValueError("Best-guess input assumption lineage is stale or invalid")
+        # Evidence-only reviews may change a version without changing the input claim.
+        versions = prior_versions
+    return {"source_evidence_ids": list(dict.fromkeys(sources)),
+            "input_fact_keys": list(dict.fromkeys(inputs)), "added_assumptions": added,
+            "input_assumption_versions": versions, "input_assumption_claims": claims}
+
+
+def candidate_response_schema(*, scenarios=None, evidence=None, numeric_inputs=None):
     prose = {"type": "string", "minLength": 1}
     properties = {name: prose for name in ("subject", "statement", "basis")}
     properties["subject"] = {**prose, "description": "Exact subject from context.defined_scenarios, "
@@ -121,9 +194,20 @@ def candidate_response_schema(*, scenarios=None):
     if scenarios is not None:
         properties["subject"] = {"type": "string", "enum": list(scenarios),
                                  "description": "Exact reviewed target or calibration context; no new scope or replacement is allowed"}
+    def references(options, description):
+        item = {"type": "string"} if options is None else (
+            {"type": "string", "enum": list(options)} if options else False)
+        return {"type": "array", "uniqueItems": True, "items": item, "description": description}
+    inferred = {
+        "entry_type": {"const": "best_guess", "description": "An LLM-inferred parameter, not a directly reported source fact"},
+        "source_refs": references(evidence, "Admitted evidence used in this inference; [] honestly declares no source support yet"),
+        "input_refs": references(numeric_inputs, "Existing numeric inputs used in the recasting or calculation; preserve their native meaning"),
+        "added_assumptions": {"type": "array", "items": prose,
+                              "description": "Explicit approximations or transfer assumptions added by this inference"},
+    }
     schema = {"oneOf": [
         {"type": "object", "additionalProperties": False,
-         "required": [*properties, "field", "value", "unit"], "properties": {**properties,
+         "required": [*properties, "field", "value", "unit", *inferred], "properties": {**properties, **inferred,
              "field": {"type": "string", "enum": sorted(UNITS)},
              "value": {"type": "number", "description": "Finite scalar hypothesis, not an unresolved dependency"},
              "unit": {"type": "string", "enum": sorted(set(UNITS.values())),
@@ -170,12 +254,22 @@ def assess_assumption(agent, action, ledger, context):
     if not isinstance(keys, list) or any(not isinstance(k, str) or k not in options for k in keys):
         raise ValueError("Assumption evidence must reference the admitted evidence catalog")
     evidence = {k: options[k] for k in dict.fromkeys(keys)}
+    inference = {}
+    if claim.get("entry_type") == "best_guess":
+        from .tools import input_options
+        numeric = {fact.key: fact for fact in input_options(ledger).values()}
+        derivation = claim["derivation"]
+        inference = {
+            "proposed_source_refs": [key for key, row in evidence.items()
+                                     if identity(row) in derivation["source_evidence_ids"]],
+            "derivation_inputs": {key: numeric[key].as_record() for key in derivation["input_fact_keys"]},
+        }
     request_evidence = {k: e for k, e in evidence.items() if e.get("kind") == "request_constraint"
         and ((field in UNITS and e.get("field") == field and e.get("value") == value)
              or (field in CONDITIONS and field in e.get("fields", ())))}
     review = agent({
         "operation": "assess_assumption_reasonableness", "candidate": claim,
-        "evidence": evidence, "context": context, "rubric": RUBRIC,
+        "evidence": evidence, "context": context, "rubric": RUBRIC, **inference,
         "previous_assessments": [assessment_summary(a) for a in ledger.assumptions.values()
                                  if a["subject"] == subject and a["field"] == field],
         "instruction": (
@@ -184,6 +278,13 @@ def assess_assumption(agent, action, ledger, context):
             "the inference and its bounds. Evidence may concern ingredients, related systems or extremes "
             "rather than the final parameter. Assess the approximation or analogy explicitly; an extreme "
             "observation is not a representative measurement, but may anchor a bounded heuristic. "
+            "For a best_guess entry, check the recasting, arithmetic, dimensional meaning and added "
+            "assumptions stated in basis and derivation against derivation_inputs and the source evidence. "
+            "proposed_source_refs records the proposer's claimed support, not your admission decision; "
+            "select supporting_evidence independently. The inferred value has its own record and need "
+            "not be printed in its source. Never turn a source's native quantity into a different "
+            "measurement by relabeling it. Empty proposed references do not provide support; judge "
+            "any support you independently identify only from the admitted evidence catalog. "
             "Separate physical plausibility from empirical applicability. "
             "Do not treat source model choices as observations or request constraints as empirical proof. "
             "Cite only supplied evidence options. Unsupported candidates remain hypotheses, not facts. "

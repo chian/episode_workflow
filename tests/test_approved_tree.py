@@ -33,7 +33,7 @@ def walk(record):
 
 def local_run(agent, *, window=600):
     return ResearchRun(ResearchProviders(agent, lambda *_: (), lambda _: None),
-                       ResearchLimits(text_window_chars=window, max_model_calls=200), "Synthetic reading task", (FIELD,))
+                       ResearchLimits(text_window_chars=window), "Synthetic reading task", (FIELD,))
 
 
 def execute_binding(run, source, grain):
@@ -137,7 +137,7 @@ class ApprovedTreeTests(unittest.TestCase):
             return base(request)
         record, report = run_guideline_research(research_request=REQUEST,
             providers=ResearchProviders(agent, lambda *_: [{"url": "https://example.test/full", "text": source_text}], lambda _: None),
-            limits=ResearchLimits(max_model_calls=200))
+            limits=ResearchLimits())
         self.assertTrue(report.passed, report.data["unresolved"][:5])
         self.assertEqual(set(report.data["scenarios"]["target"]["coverage"]), set(DEFAULT_METRICS))
         self.assertTrue(all(r["status"] == "calculated" for r in report.data["scenarios"]["target"]["coverage"].values()))
@@ -239,7 +239,7 @@ class ApprovedTreeTests(unittest.TestCase):
             elif request["operation"] == "propose_investigation_strategy":
                 response["child_model_calls"] = 1000
             return response
-        _, (record, report) = run_synthetic(agent, ResearchLimits(max_model_calls=20))
+        _, (record, report) = run_synthetic(agent, ResearchLimits())
         investigation = record.unit_records[0].child
         strategy = investigation.unit_records[0].child
         granted = strategy.goal.as_record()["result_contract"]["operational_limits"]
@@ -260,7 +260,7 @@ class ApprovedTreeTests(unittest.TestCase):
             with self.subTest(value=value):
                 run = ResearchRun(ResearchProviders(lambda _: {"option": "source:1", "question": "Read",
                     "child_model_calls": value}, lambda *_: [{"url": "https://example.test/a"}],
-                    lambda _: self.fail("Invalid allowance must not retrieve")), ResearchLimits(max_model_calls=1), REQUEST, (FIELD,))
+                    lambda _: self.fail("Invalid allowance must not retrieve")), ResearchLimits(), REQUEST, (FIELD,))
                 source = SearchSource(run, (), query="Synthetic query")
                 _, result = execute_binding(run, source, "search")
                 self.assertFalse(source.visited)
@@ -311,7 +311,7 @@ class ApprovedTreeTests(unittest.TestCase):
         base = AdaptiveAgent()
         inherited = {"stage": "retrieval", "category": "provider_failure", "why": "fixture inherited failure"}
         run = ResearchRun(ResearchProviders(base, lambda *_: [{"url": "https://example.test/good", "text": SOURCE_TEXT}],
-                                           lambda _: None), ResearchLimits(max_model_calls=20), REQUEST, (FIELD,))
+                                           lambda _: None), ResearchLimits(), REQUEST, (FIELD,))
         source = SearchSource(run, ResearchResult(diagnostics=(inherited,), issues=(inherited["why"],)), query="Synthetic query")
         _, result = execute_binding(run, source, "search")
         self.assertIn(inherited["why"], result.issues)
@@ -366,7 +366,7 @@ class ApprovedTreeTests(unittest.TestCase):
             raise AssertionError(request["operation"])
         _, report = run_guideline_research(research_request=REQUEST,
             providers=ResearchProviders(agent, lambda *_: self.fail("Invalid focus must not open acquisition"), lambda _: None),
-            metrics=METRICS, limits=ResearchLimits(max_model_calls=2))
+            metrics=METRICS, limits=ResearchLimits())
         self.assertFalse(report.passed)
         why = report.data["attempt_diagnostics"][0]["why"]
         self.assertIn("undeclared_parameter", why)
@@ -405,7 +405,7 @@ class ApprovedTreeTests(unittest.TestCase):
                         {"subject": "target", "field": "plume_encounter_probability", "value": value,
                          "unit": "fraction", "statement": "Unresolved numerical dependency", "basis": "Test"}]}
                 run = ResearchRun(ResearchProviders(agent, lambda *_: self.fail("No acquisition before validation"),
-                    lambda _: None), ResearchLimits(max_model_calls=1), REQUEST, (FIELD,))
+                    lambda _: None), ResearchLimits(), REQUEST, (FIELD,))
                 source = InvestigationSource(run, ResearchResult(scenarios=({"subject": "target"},)))
                 _, result = execute_binding(run, source, "investigate")
                 self.assertEqual([r["operation"] for r in requests], ["propose_investigation_strategy"])
@@ -434,7 +434,7 @@ class ApprovedTreeTests(unittest.TestCase):
                         return {"query": "Synthetic targeted query", "objective": "Find relevant evidence"}
                     raise AssertionError(request["operation"])
                 run = ResearchRun(ResearchProviders(agent, lambda *_: (), lambda _: None),
-                                  ResearchLimits(max_model_calls=2), REQUEST, (FIELD,))
+                                  ResearchLimits(), REQUEST, (FIELD,))
                 source = InvestigationSource(run, ResearchResult(scenarios=({"subject": "target"},)))
                 record, _ = execute_binding(run, source, "investigate")
                 strategy_request = next(r for r in requests if r["operation"] == "propose_strategy_query")
@@ -465,7 +465,7 @@ class ApprovedTreeTests(unittest.TestCase):
             return parse_json_object(raw)
         record, report = run_guideline_research(research_request=REQUEST,
             providers=ResearchProviders(agent, lambda *_: (), lambda _: None), metrics=METRICS,
-            limits=ResearchLimits(max_model_calls=3))
+            limits=ResearchLimits())
         self.assertFalse(report.passed)
         self.assertEqual(record.controller_state.history, (0.0,))
         self.assertEqual(len(report.data["model_attempts"]), 3)
@@ -701,7 +701,7 @@ class ApprovedTreeTests(unittest.TestCase):
                      "text": revised_text if revised else SOURCE_TEXT},)
         record, report = run_guideline_research(research_request=REQUEST,
             providers=ResearchProviders(agent, search, lambda _: None), metrics=METRICS,
-            limits=ResearchLimits(max_model_calls=400, max_total_units=400))
+            limits=ResearchLimits())
         self.assertTrue(report.passed, report.data["unresolved"])
         sequence = [u.child.scope_level if u.child else u.unit_label for u in record.unit_records]
         self.assertEqual(sequence[:4], ["investigate", "calculate_transmission_metrics", "calculate_conditional_limits", "investigate"])
@@ -718,7 +718,7 @@ class ReadingBindingTests(unittest.TestCase):
             requests.append(request)
             return {"source_id": "source:1", "question": "Find evidence"}
         run = ResearchRun(ResearchProviders(agent, lambda *_: [{"url": "https://example.test/source"}], lambda _: None),
-                          ResearchLimits(max_model_calls=1), REQUEST, (FIELD,))
+                          ResearchLimits(), REQUEST, (FIELD,))
         source = SearchSource(run, (), query="synthetic evidence")
         _, result = execute_binding(run, source, "search")
         contract = requests[0]["response_contract"]
@@ -739,7 +739,7 @@ class ReadingBindingTests(unittest.TestCase):
                 return {"facts": [candidate], "findings": []}
             return parse_json_object('{"decisions": [')
         run = ResearchRun(ResearchProviders(agent, lambda *_: (), lambda _: None),
-                          ResearchLimits(max_model_calls=2), REQUEST, (FIELD,))
+                          ResearchLimits(), REQUEST, (FIELD,))
         document = Document("https://example.test/source", "Fixture", quote, 600)
         _, result = execute_binding(run, ReportSource(run, (), document=document), "report")
         self.assertEqual(run.model_attempts[0]["response"]["facts"], [candidate])
@@ -812,7 +812,7 @@ class ReadingBindingTests(unittest.TestCase):
                     requests.append(request)
                     return {**proposal, "question": "Inspect a synthetic row"}
                 run = ResearchRun(ResearchProviders(agent, lambda *_: (), lambda _: None),
-                                  ResearchLimits(max_model_calls=1), REQUEST, (FIELD,))
+                                  ResearchLimits(), REQUEST, (FIELD,))
                 document = Document("https://example.test/table", "Fixture",
                     "| Activity | Cq |\n| --- | --- |\n| Speaking | 30 |\n", 600)
                 source = SourceTableSource(run, (), document=document, table=document.tables[0])
@@ -832,7 +832,7 @@ class ReadingBindingTests(unittest.TestCase):
                 return {"query": "target activity", "column": "Activity", "question": "Find synthetic target row"}
             return {"facts": [], "evidence": [], "findings": []}
         run = ResearchRun(ResearchProviders(agent, lambda *_: (), lambda _: None),
-                          ResearchLimits(max_model_calls=2), REQUEST, (FIELD,))
+                          ResearchLimits(), REQUEST, (FIELD,))
         text = "| Activity | Cq |\n| --- | --- |\n" + "| Other | 10 |\n" * 9 + "| Target activity | 30 |\n"
         document = Document("https://example.test/table", "Fixture", text, 600)
         source = SourceTableSource(run, (), document=document, table=document.tables[0])

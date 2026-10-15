@@ -25,6 +25,8 @@ class Scenario:
     basis: str = "Caller-defined case conditions, not empirical evidence or computed answers."
 
     def as_record(self):
+        from .scenario_sharing import needed_fields
+
         fixed = {field: {"value": value, "unit": UNITS[field]} for field, value in self.fixed}
         contracts = {}
         for name, (operation, background) in EXPOSURE_OUTPUTS.items():
@@ -33,12 +35,14 @@ class Scenario:
                 "fixed_inputs": {field: fixed[field] for field in FIXED_FIELDS[operation] if field in fixed},
                 "solved_variable": {"solve_time": "exposure_time_s", "solve_distance": "neighbor_distance_m",
                                     "evaluate_R_in": None}[operation]}
-        return {"subject": self.subject, "description": self.description, "role": "target",
+        record = {"subject": self.subject, "description": self.description, "role": "target",
                 "basis": self.basis, "scope_review": "Fixed by the caller's scenario selection.",
                 "scope_locked": True,
                 "fixed_parameters": fixed, "output_contracts": contracts,
                 "fixed_conditions": dict(self.conditions),
                 "assumption_needs": list(self.assumption_needs), "calculation_variables": list(self.variables)}
+        record["assumption_needs"] = sorted(needed_fields(record))
+        return record
 
 
 def _paper_cases():

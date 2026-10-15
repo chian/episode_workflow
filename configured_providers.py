@@ -112,7 +112,7 @@ class ProviderConfigurationError(ValueError):
 def run_configured_safety_guideline_request(
     *, disease, research_request="", scenario="bazant-bush", transmission_model=None, search_limit=10,
     require_transmissibility_evidence=False, config=None, env=None, progress=False,
-    metrics=None, limits=None, trace_event=None,
+    metrics=None, limits=None, trace_event=None, checkpoint=None,
 ):
     """Generic disease input and caller-selected cases, with no supplied answers."""
     disease = _required_text(disease, "disease")
@@ -123,7 +123,7 @@ def run_configured_safety_guideline_request(
         raise ProviderConfigurationError("Fixed-pipeline switches are retired. Request the scientific conditions in the original prompt and select quantities with --metric. Calculations retain explicit input assumptions and their support status.")
     return run_configured_guideline_research(disease=disease, research_request=research_request, scenario=scenario, metrics=metrics,
         limits=replace(limits or ResearchLimits(), search_limit=search_limit),
-        config=config, env=env, progress=progress, trace_event=trace_event)
+        config=config, env=env, progress=progress, trace_event=trace_event, checkpoint=checkpoint)
 
 
 def run_configured_evaluate_safety_guideline_episode(
@@ -195,7 +195,7 @@ def firecrawl_argo_providers(
     )
 
 
-def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progress=False, trace_event=None):
+def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progress=False, trace_event=None, checkpoint=None):
     """Research operations with Firecrawl search and Jev page assessment."""
     from .case_reports.research import ResearchProviders
     from .task_executors.evidence_extraction.argo import parse_json_object
@@ -220,7 +220,23 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
         model=config.jev_model,
         timeout=config.request_timeout_s,
     )
+    if checkpoint is not None:
+        from .checkpoint import JournaledClient
+        checkpoint.configure({name: getattr(config, name) for name in (
+            "llm_provider", "llm_base_url", "llm_model", "llm_fast_model",
+            "llm_reasoning_effort", "llm_fast_reasoning_effort", "llm_user",
+            "firecrawl_base_url", "firecrawl_scrape_results", "jev_endpoint",
+            "jev_model", "request_timeout_s", "require_jev")},
+            secrets=(config.firecrawl_api_key, config.typesafe_api_key, config.llm_api_key))
+        clients = {tier: JournaledClient(client, checkpoint, "model." + tier.value)
+                   for tier, client in clients.items()}
+        assessor = JournaledClient(assessor, checkpoint, "jev")
+        sink = trace_event
+        trace_event = lambda item: checkpoint.event(item, sink)
     preflight_attempts = []
+
+    def showing_progress():
+        return progress and (checkpoint is None or not checkpoint.replaying)
 
     def model_route(operation, tier):
         route = policy.route(operation, tier)
@@ -230,7 +246,7 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
 
     def agent_for_tier(request, tier):
         route = model_route(request["operation"], tier)
-        if progress:
+        if showing_progress():
             print(f"Research model: {request['operation']} tier={tier.value} "
                   f"model={route['model']}" +
                   (f" effort={route['reasoning_effort']}" if "reasoning_effort" in route else ""),
@@ -259,12 +275,12 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
         return agent_for_tier(request, tier_for_operation(request["operation"]))
 
     def event(item):
-        if progress:
+        if showing_progress():
             target = item.get("target_assumptions", {})
             values = item.get("recorded_target_inputs", {})
             related = item.get("source_target_learning", {})
             print(f"Research verdict: {item['unit']} gain={item['gain']:.6g} stop={item['stop']} "
-                  f"evaluated={item['evaluated']} calls={item['model_calls']}/{item['model_call_limit']} "
+                  f"evaluated={item['evaluated']} calls={item['model_calls']} "
                   f"goal={item.get('global_goal_score', 0):.4f} "
                   f"root_projection={item.get('root_credit_projection') or 0:.4f} "
                   f"values_found={values.get('recorded', 0)}/{values.get('required', 0)} "
@@ -274,7 +290,7 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
                   f"issues={item['issues'][:2]}", file=sys.stderr, flush=True)
 
     def relation_event(item):
-        if progress:
+        if showing_progress():
             print(f"Source-target relation: investigating={item['investigated_target_subjects']} "
                   f"source_event={item['source_subject']} ({item['source_roles']}) "
                   f"source={item['source']} target={item['target_subject']} "
@@ -301,7 +317,7 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
             ), "criteria": {"true": "The source event is a close match or a defensible transfer to this target.",
                              "false": "Key source and target conditions conflict or the source does not inform this parameter."}}
                          for name in selected}
-            if progress:
+            if showing_progress():
                 print(f"Jev source-target: source_event={item['source_subject']} "
                       f"targets={selected} parameter={item['parameter']}",
                       file=sys.stderr, flush=True)
@@ -385,26 +401,37 @@ def firecrawl_argo_research_providers(config: WorkflowProviderConfig, *, progres
                 if retry:
                     raise
 
-    return ResearchProviders(agent, lambda query, limit: firecrawl_search(
-        query, api_key=config.firecrawl_api_key, limit=limit,
-        scrape_results=config.firecrawl_scrape_results,
-        base_url=config.firecrawl_base_url, timeout=config.request_timeout_s,
-    ), firecrawl_retrieve_callable(config.firecrawl_api_key, base_url=config.firecrawl_base_url,
-                                   timeout=config.request_timeout_s), event, trace_event=trace_event,
+    def search(query, limit):
+        def invoke():
+            return firecrawl_search(
+                query, api_key=config.firecrawl_api_key, limit=limit,
+                scrape_results=config.firecrawl_scrape_results,
+                base_url=config.firecrawl_base_url, timeout=config.request_timeout_s,
+            )
+        return invoke() if checkpoint is None else checkpoint.call(
+            "firecrawl.search", {"query": query, "limit": limit}, invoke)
+
+    retrieve = firecrawl_retrieve_callable(config.firecrawl_api_key, base_url=config.firecrawl_base_url,
+                                         timeout=config.request_timeout_s)
+    if checkpoint is not None:
+        original_retrieve = retrieve
+        retrieve = lambda candidate: checkpoint.call("firecrawl.retrieve", candidate,
+                                                      lambda: original_retrieve(candidate))
+    return ResearchProviders(agent, search, retrieve, event, trace_event=trace_event,
        page_assessor=assessor, agent_for_tier=agent_for_tier, model_route=model_route,
        relation_event=relation_event, source_target_assessor=source_target_assessor,
        scenario_parameter_assessor=scenario_parameter_assessor,
-       preflight_attempts=preflight_attempts)
+       preflight_attempts=preflight_attempts, checkpoint=checkpoint)
 
 
 def run_configured_guideline_research(*, disease, research_request="", scenario="bazant-bush", metrics=None, limits=None,
-                                    config=None, env=None, progress=False, trace_event=None):
+                                    config=None, env=None, progress=False, trace_event=None, checkpoint=None):
     from .case_reports.research import run_guideline_research
     kwargs = {} if metrics is None else {"metrics": metrics}
     return run_guideline_research(
         disease=disease, research_request=research_request, scenario=scenario, limits=limits,
         providers=firecrawl_argo_research_providers(config or firecrawl_argo_config_from_env(env),
-            progress=progress, trace_event=trace_event),
+            progress=progress, trace_event=trace_event, checkpoint=checkpoint),
         **kwargs,
     )
 

@@ -18,7 +18,7 @@ from ...task_executors.scenario_metrics.evaluate import metric_conditions
 from ...task_executors.scenario_metrics.dependencies import PARAMETER_DERIVATIONS
 from ...task_executors.scenario_metrics.conditional import CONDITIONAL_INPUTS, conditional_inputs
 from .communication import decision_diagnostics, reading_coverage
-from .goal_state import GLOBAL_GOAL_PROGRESS, GLOBAL_SCORE_WEIGHTS, ScientificGoalState
+from .goal_state import GLOBAL_GOAL_PROGRESS, ScientificGoalState
 from .model_tiers import ModelTier, tier_for_operation
 from .progress import PARAMETER_EVIDENCE, parameter_requirements, parameter_support, progress_credit
 from .records import (Credit, Ledger, ResearchMessage, ResearchResult, diagnostic_value, condensed_diagnostics,
@@ -40,8 +40,6 @@ CONSISTENCY = "evidence_consistency"
 
 @dataclass(frozen=True)
 class ResearchLimits:
-    max_model_calls: int = 240
-    max_total_units: int = 240
     search_limit: int = 8
     text_window_chars: int = 12000
     yield_window: int = 4
@@ -68,10 +66,7 @@ class ResearchProviders:
     source_target_assessor: Callable[[Mapping], Mapping[str, float]] | None = None
     scenario_parameter_assessor: Callable[[Mapping], Mapping] | None = None
     preflight_attempts: list[Mapping] | None = None
-
-
-class BudgetExceeded(RuntimeError):
-    pass
+    checkpoint: object | None = None
 
 
 def selected_choice(value, options, field):
@@ -105,6 +100,8 @@ class ResearchRun:
             paths.extend((root / folder).rglob("*.py"))
         self.implementation = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                                for path in sorted(paths)}
+        if providers.checkpoint is not None:
+            self.implementation = providers.checkpoint.run_start_implementation(self.implementation)
         self.context = {"research_request": research_request, "reference_model": PAPER,
                         "scenario_selection": scenario_selection,
                         "requested_metrics": list(metrics), "fixed_scenarios": self.fixed_scenarios}
@@ -176,14 +173,8 @@ class ResearchRun:
 
     def controller(self, path):
         focus, initial, scientific, outputs = self.controller_specs[path[-1][1]]
-        outputs = set(METRICS) if outputs is None else set(outputs)
-        groups = tuple(g for g in (tuple(f for f in focus if f not in outputs and f not in {CONSISTENCY, GLOBAL_GOAL_PROGRESS}),
-                                   tuple(f for f in focus if f in outputs),
-                                   tuple(f for f in focus if f == CONSISTENCY),
-                                   tuple(f for f in focus if f == GLOBAL_GOAL_PROGRESS)) if g) if scientific else None
-        return ResearchController(focus, window=self.limits.yield_window, initial=initial,
-                                  capacity=1 if scientific else 2, groups=groups, sum_qualities=scientific,
-                                  point_scores=not scientific)
+        return ResearchController((GLOBAL_GOAL_PROGRESS,), window=self.limits.yield_window,
+                                  initial=initial, point_scores=True)
 
     def root_credit_projection(self):
         """Read-only root score from the shared admitted ledger, including nested child work."""
@@ -198,8 +189,6 @@ class ResearchRun:
             exc = ProviderError(self.provider_unavailable["why"])
             exc.model_call_diagnostic = dict(self.provider_unavailable)
             raise exc
-        if self.model_calls >= self.limits.max_model_calls:
-            raise BudgetExceeded("model_call_budget_exhausted")
         self.model_calls += 1
         operation = request.get("operation", "")
         tier = tier or tier_for_operation(operation)
@@ -232,14 +221,12 @@ class ResearchRun:
         return result
 
     def complete(self, request, *, tier=None):
-        """Record mandatory processing under the caller's global cap."""
+        """Record mandatory processing as a model attempt."""
         return self.agent(request, completing=True, tier=tier)
 
     def model_diagnostic(self, exc):
         if hasattr(exc, "model_call_diagnostic"):
             return dict(exc.model_call_diagnostic)
-        if isinstance(exc, BudgetExceeded):
-            return {"category": "operational_limit", "why": str(exc)}
         details = dict(exc.diagnostic) if isinstance(exc, ModelOutputError) else {
             "category": "provider_failure" if isinstance(exc, (ProviderError, OSError)) else "invalid_action_contract",
             "why": str(exc)}
@@ -267,10 +254,14 @@ class ResearchRun:
         self.controller_specs[key] = (source.focus, source.credit(source.ledger.result()), source.uses_scientific_credit(), source.output_fields)
         if grain == "evaluate_airborne_safety_guideline":
             self.root_source, self.root_key = source, key
-        return Episode(self.grains[grain], key, source, EpisodeRequest(
+        episode = Episode(self.grains[grain], key, source, EpisodeRequest(
             goal, ResearchMessage(str(goal.objective), source.requested_subjects,
                                   diagnostic_value(proposal or {})), contract),
             source.build_result, on_unit=source.after_verdict)
+        if self.providers.checkpoint is not None:
+            episode = self.providers.checkpoint.instrument(episode,
+                lambda: self.global_goal.ledger.result().as_record())
+        return episode
 
     def child(self, parent, source, grain, objective, *, contract, proposal):
         parent_source = self.sources[parent.goal.goal_id]
@@ -327,8 +318,7 @@ class ResearchSource:
         if self.failure and self.completion_diagnostic is None:
             self.completion_diagnostic = self.run.identify_diagnostic({
                 "stage": "episode_completion",
-                "category": ("provider_usage_limit" if "provider_usage_limit" in reason else
-                             "operational_limit" if "budget_exhausted" in reason else "source_termination"),
+                "category": "provider_usage_limit" if "provider_usage_limit" in reason else "source_termination",
                 "why": reason,
                 "requested_fields": list(self.focus),
                 "question": str(self.goal.objective),
@@ -429,7 +419,6 @@ class ResearchSource:
                     "admitted_facts": len(self.pending.facts), "estimates": len(self.pending.estimates),
                     "issues": new_issues, "gain": view.controller_step.gain,
                     "stop": view.controller_step.stop, "model_calls": self.run.model_calls,
-                    "model_call_limit": self.run.limits.max_model_calls,
                     "global_goal_score": global_status["weighted_score"],
                     "root_credit_projection": root_projection,
                     "target_assumptions": global_status["target_assumptions"],
@@ -463,31 +452,21 @@ class ResearchSource:
 
     def credit(self, result):
         if self.uses_scientific_credit():
-            local = result.credit(tuple(field for field in self.focus if field != GLOBAL_GOAL_PROGRESS),
-                                  scientific=True, subjects=self.credit_subjects, outputs=self.output_fields)
-            return self.global_credit(local, result) if GLOBAL_GOAL_PROGRESS in self.focus else local
+            return self.run.global_goal.credit(result)
         if (self.parent_contract is not None
                 and self.parent_contract.measurements.get("deliverable") == "source_findings"
                 and self.parent_contract.measurements.get("target_scenarios") is not None):
-            from .relevance import TARGET_RELEVANCE_CREDIT_MEANING, target_relevance_credit
+            from .relevance import target_relevance_credit
             all_targets = self.parent_contract.measurements["target_scenarios"]
             targets = {name: all_targets[name] for name in self.requested_subjects if name in all_targets} or all_targets
             groups = {row["type_id"]: row for row in result.source_event_types}
-            self.credit_meaning_override = TARGET_RELEVANCE_CREDIT_MEANING
-            self.information_assessment, credit = target_relevance_credit(
+            self.information_assessment, _ = target_relevance_credit(
                 result, self.parameter_requirements, groups, targets, parameter=self.parameter)
-            return self.global_credit(credit, result)
+            return self.run.global_goal.credit(result)
         self.information_assessment = parameter_support(result, self.parameter_requirements,
             hypotheses_only=self.parent_contract.measurements.get("deliverable") == "assumption_hypotheses",
             subjects=self.requested_subjects)
-        return self.global_credit(progress_credit(self.information_assessment, evaluated=result.evaluated), result)
-
-    def global_credit(self, local, result):
-        status = self.run.global_goal.preview(result)
-        qualities = (*local.qualities, *((GLOBAL_GOAL_PROGRESS, name, value * GLOBAL_SCORE_WEIGHTS[name])
-                                        for name, value in status["scores"].items()))
-        return Credit(identities=local.identities, evaluated=local.evaluated, qualities=qualities,
-                      quality_resolution=min(local.quality_resolution or 1.0, 0.001))
+        return self.run.global_goal.credit(result)
 
     def evidence_handoff_ready(self):
         """Return new parameter evidence promptly for a higher-level scientific decision."""
@@ -555,7 +534,7 @@ class ResearchSource:
             if (set(report) != {"findings"} or not isinstance(report["findings"], str)
                     or not report["findings"].strip()):
                 raise ValueError("Child synthesis must contain only a brief findings paragraph")
-        except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+        except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
             diagnostic = self.run.identify_diagnostic({"stage": "synthesis", **self.run.model_diagnostic(exc)})
             if self.pending is not None:
                 self.pending = replace(self.pending, diagnostics=(*self.pending.diagnostics, diagnostic))
@@ -628,8 +607,6 @@ class ResearchSource:
                     d for d in self.ledger.diagnostics if identity(d) not in self.communicated["diagnostics"]))}
 
     def failure_result(self, exc, stage):
-        if isinstance(exc, BudgetExceeded):
-            self.failure = str(exc)
         issue = f"{stage} failed: {type(exc).__name__}: {exc}"
         return ResearchResult(issues=(issue,), evaluated=False, diagnostics=({
             "stage": stage, **self.run.model_diagnostic(exc),
@@ -644,7 +621,7 @@ class ResearchSource:
         def execute(_):
             try:
                 return function()
-            except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError,
+            except (ProviderError, ValueError, TypeError, KeyError,
                     ZeroDivisionError, OverflowError, OSError) as exc:
                 return self.failure_result(exc, label)
         return Leaf(None, execute, lambda _, result: self.project(result), label)
@@ -657,15 +634,10 @@ class ResearchSource:
             return SourceEnd("source_failed")
         if self.failure:
             return SourceEnd("source_failed")
-        if (self.run.total_units >= self.run.limits.max_total_units
-                or self.run.model_calls >= self.run.limits.max_model_calls):
-            self.failure = "operational_budget_exhausted_not_scientific_convergence"
-            self.ledger.issues.append(self.failure)
-            return SourceEnd("source_failed")
         try:
             self.last_proposal = None
             return self.propose(view)
-        except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+        except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
             result = self.failure_result(exc, "proposal")
             return self.leaf(lambda: result, f"proposal_failure:{view.units_consumed}")
 

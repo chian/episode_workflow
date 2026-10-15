@@ -8,18 +8,24 @@ from .records import identity
 
 
 def needed_fields(scenario):
+    from ...task_executors.scenario_metrics.dependencies import fixed_input_fields, input_fields
+    from ...task_executors.scenario_metrics.evaluate import DEFAULT_METRICS, UNITS
+
     declared = set(scenario.get("assumption_needs", ()))
-    if declared:
-        return declared
-    from ...task_executors.scenario_metrics.evaluate import DEFAULT_METRICS
-    from .goal_state import _static_source_needs
-    return _static_source_needs(scenario, DEFAULT_METRICS)
+    fixed = scenario.get("fixed_parameters", {})
+    conditions = scenario.get("fixed_conditions", {})
+    outputs = tuple(scenario.get("output_contracts", {})) or DEFAULT_METRICS
+    dependencies = input_fields(outputs, parameters=UNITS,
+        fixed_values={field: row["value"] for field, row in fixed.items()},
+        fixed_conditions=conditions)
+    return ((declared | (dependencies & UNITS.keys())) - fixed_input_fields(fixed, conditions) - conditions.keys()
+            - set(outputs) - set(scenario.get("calculation_variables", ())))
 
 
 def scenario_version(scenario):
     return identity({name: scenario.get(name) for name in
         ("subject", "description", "fixed_parameters", "fixed_conditions", "assumption_needs",
-         "calculation_variables")})
+         "calculation_variables", "output_contracts")})
 
 
 def _fixed_features(scenarios):

@@ -300,7 +300,7 @@ class PromptBoundaryTests(unittest.TestCase):
             if request["operation"] == "propose_investigation_strategy":
                 return {"action": "unknown", "why": "Malformed fixture action"}
             return agent(request)
-        _, (_, report) = run_synthetic(failing, ResearchLimits(max_model_calls=25, max_units_per_episode=3))
+        _, (_, report) = run_synthetic(failing, ResearchLimits())
         failures = report.data["attempt_diagnostics"]
         self.assertTrue(any(d["category"] == "invalid_action_contract" for d in failures))
         self.assertTrue(any((d.get("proposal") or {}).get("action") == "unknown" for d in failures))

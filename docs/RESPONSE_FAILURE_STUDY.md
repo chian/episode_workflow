@@ -1,5 +1,9 @@
 # Response Failure Study
 
+Historical trace and experiment record. Earlier call and unit ceilings described
+below are not current workflow controls; current episodes have no such budgets
+and stop through numerical yield, source exhaustion, or provider failure.
+
 ## Explicit Distance Regimes
 
 The next engineering review examined the [paper's model boundary](https://thales.mit.edu/bush/wp-content/uploads/2021/04/BazantBush-PNAS2021.pdf),

@@ -1,9 +1,10 @@
 """Executable parameter derivations and their parent-facing dependency contracts."""
 
 from dataclasses import dataclass
+import operator
 from typing import Callable
 
-from .catalog import METRICS, metric_conditions, metric_routes
+from .catalog import METRICS, metric_conditions, metric_routes, select_metric
 from .conditional import CONDITIONAL_INPUTS, conditional_inputs
 
 
@@ -38,24 +39,51 @@ PARAMETER_DERIVATIONS = (
 DERIVED_NAMES = frozenset(d.output for d in PARAMETER_DERIVATIONS)
 
 
-def input_fields(names, *, parameters=()):
+def fixed_input_fields(available, conditions=()):
+    """Inputs supplied directly or derivable entirely from caller-fixed inputs."""
+    fields, conditions = set(available), set(conditions)
+    while True:
+        derived = {d.output for d in PARAMETER_DERIVATIONS
+                   if set(d.inputs) <= fields and set(d.conditions) <= conditions}
+        if derived <= fields:
+            return fields
+        fields.update(derived)
+
+
+def input_fields(names, *, parameters=(), fixed_values=None, fixed_conditions=()):
     """All relevant parameter/condition fields across executable dependency routes."""
     seen, fields = set(), set()
+    fixed_values = fixed_values or {}
+    fixed_conditions = set(fixed_conditions)
+    fixed = fixed_input_fields(fixed_values, fixed_conditions) | fixed_conditions
+
+    def compatible(route):
+        if fixed_conditions & {"continuous_unmasked_jet", "negligible_near_field"}:
+            if route.regime != select_metric(route.name, fixed_conditions).regime:
+                return False
+        for constraint in route.parameter_constraints():
+            field = constraint["field"]
+            accepts = {"equal": operator.eq, "minimum": operator.ge}[constraint["operator"]]
+            if field in fixed_values and not accepts(fixed_values[field], constraint["value"]):
+                return False
+        return True
 
     def visit(name):
-        if name in seen:
+        if name in seen or name in fixed:
             return
         seen.add(name)
         if name not in METRICS or name in DERIVED_NAMES or name in parameters:
             fields.add(name)
         if name in METRICS:
             for route in metric_routes(name):
-                fields.update(metric_conditions(name, regime=route.regime))
+                if not compatible(route):
+                    continue
+                fields.update(metric_conditions(name, regime=route.regime) - fixed_conditions)
                 for dependency in (*route.inputs, *(c["field"] for c in route.parameter_constraints())):
                     visit(dependency)
         for derivation in PARAMETER_DERIVATIONS:
             if derivation.output == name:
-                fields.update(derivation.conditions)
+                fields.update(set(derivation.conditions) - fixed_conditions)
                 for dependency in derivation.inputs:
                     visit(dependency)
 

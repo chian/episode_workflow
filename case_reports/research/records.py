@@ -75,9 +75,35 @@ def cited_assessment_evidence(assessment):
     return {key: item for key, item in assessment["evidence"].items() if key in references}
 
 
-def assessment_summary(assessment):
-    return {**{k: v for k, v in assessment.items() if k not in {"key", "evidence", "assessment_basis_version"}},
-            "evidence": cited_assessment_evidence(assessment),
+def assumption_model_view(assumption, *, evidence_options=None, numeric_options=None):
+    """Present inference meaning without exposing protected child audit identities."""
+    view = dict(assumption)
+    derivation = assumption.get("derivation", {})
+    identities = ("source_evidence_ids", "input_fact_keys",
+                  "input_assumption_versions", "input_assumption_claims")
+    if not any(derivation.get(name) for name in identities):
+        return view
+    evidence = assumption.get("evidence", {}) if evidence_options is None else evidence_options
+    numeric = {} if numeric_options is None else numeric_options
+    source_ids, input_keys = set(derivation.get("source_evidence_ids", ())), set(derivation.get("input_fact_keys", ()))
+    inputs = {}
+    for ref, fact in numeric.items():
+        if fact.key in input_keys and fact.key not in inputs:
+            inputs[fact.key] = {"reference": ref, **fact.semantic_record()}
+    view["derivation"] = {
+        "source_refs": [ref for ref, record in evidence.items() if identity(record) in source_ids],
+        "inputs": list(inputs.values()),
+        "unavailable_input_count": len(input_keys - inputs.keys()),
+        "added_assumptions": list(derivation.get("added_assumptions", ())),
+    }
+    return view
+
+
+def assessment_summary(assessment, *, numeric_options=None):
+    evidence = cited_assessment_evidence(assessment)
+    view = assumption_model_view(assessment, evidence_options=evidence, numeric_options=numeric_options)
+    return {**{k: v for k, v in view.items() if k not in {"key", "evidence", "assessment_basis_version"}},
+            "evidence": evidence,
             "considered_evidence_count": len(assessment["evidence"])}
 
 
@@ -154,6 +180,67 @@ def current_premises(record, assessments, *, ledger=None):
         if not assumption_matches(record, key, current) or current.get("review", {}).get("verdict") == "contradicted":
             return False
     return True
+
+
+def admitted_calculation(record, assessments, *, ledger, metric=None, field=None):
+    """Credit eligibility for reviewed calculations, never permission to execute."""
+    from .progress import evidence_key
+
+    if metric is not None and field is not None:
+        raise ValueError("Select an output metric or a derived field, not both")
+    invalid = {evidence_key(item) for assessment in assessments.values()
+               for item in assessment.get("invalidated_evidence", ())}
+    calculations = tuple(ledger.calculations.values())
+    same_model = ("tool", "subject", "input_fact_keys", "conditions", "assumption_versions",
+                  "operator", "basis", "parameterization")
+
+    def reviewed(row):
+        review = row.get("model_review", {})
+        return review.get("admit") is True and review.get("completed", True) is True
+
+    def producing_calculation(key):
+        producers = [row for row in calculations if key in row.get("output_fact_keys", ())]
+        if not producers:
+            return None
+        selected = producers[-1]
+        if selected.get("model_review", {}).get("completed", True) is False:
+            completed = [row for row in producers
+                         if row.get("model_review", {}).get("completed", True) is True
+                         and all(row.get(name) == selected.get(name) for name in same_model)]
+            if completed:
+                selected = completed[-1]
+        return selected
+
+    def visit(row, selected_metric, selected_field, visiting):
+        key = (row.get("version") or identity(row), selected_metric, selected_field)
+        if key in visiting or not reviewed(row):
+            return False
+        dependency = (row.get("metric_support", {}).get(selected_metric, row)
+                      if selected_metric is not None else
+                      row.get("derived_support", {}).get(selected_field, row)
+                      if selected_field is not None else row)
+        if (not reviewed(dependency)
+                or not current_premises(dependency, assessments, ledger=ledger)):
+            return False
+        records = list(row.get("input_records", ()))
+        for version in row.get("calculation_versions", ()):
+            calculation = ledger.calculations.get(version)
+            if calculation is not None:
+                records.extend(calculation.get("input_records", ()))
+        inputs = {identity(item): item for item in records}
+        inputs.update((fact.key, fact.as_record()) for fact in ledger.facts.values())
+        visiting = {*visiting, key}
+        for fact_key in dependency.get("input_fact_keys", row.get("input_fact_keys", ())):
+            fact = inputs.get(fact_key)
+            if fact is None or evidence_key(fact) in invalid:
+                return False
+            if fact.get("kind") == "derived":
+                producer = producing_calculation(fact_key)
+                if producer is None or not visit(producer, None, fact["field"], visiting):
+                    return False
+        return True
+
+    return visit(record, metric, field, set())
 
 
 def evidence_summary(evidence):
@@ -367,7 +454,9 @@ class Ledger:
         return {f"evidence:{i}": e for i, e in enumerate([*records, *self.evidence.values()], 1)}
 
     def assumption_options(self):
-        return {f"assumption:{i}": assessment_summary(a)
+        from .tools import input_options
+        numeric = input_options(self)
+        return {f"assumption:{i}": assessment_summary(a, numeric_options=numeric)
                 for i, a in enumerate(self.assumptions.values(), 1)}
 
     def calculation_options(self):

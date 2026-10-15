@@ -239,7 +239,6 @@ class AssumptionRetentionTests(unittest.TestCase):
         source = self.source(supported_review)
         self.step(source, ResearchResult())
         prior = dict(next(iter(source.ledger.assumptions.values())))
-        source.run.limits = replace(source.run.limits, max_model_calls=source.run.model_calls)
         failed = self.step(source, ResearchResult(evidence=(evidence("New context awaiting review."),)))
         self.assertFalse(failed.evaluated)
         self.assertEqual(next(iter(source.ledger.assumptions.values())), prior)
@@ -322,7 +321,7 @@ class CommunicationTests(unittest.TestCase):
             searches.append((text, limit))
             return ()
         run = ResearchRun(ResearchProviders(agent, search, lambda _: self.fail("No source was selected")),
-                          ResearchLimits(max_model_calls=2), "Synthetic query contract test", (FIELD,))
+                          ResearchLimits(), "Synthetic query contract test", (FIELD,))
         execute_binding(run, StrategySource(run, (), approach="Seek a source-backed bound"), "strategy")
         self.assertEqual(searches, [(query, run.limits.search_limit)])
         proposal = requests[0]

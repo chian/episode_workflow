@@ -7,18 +7,14 @@ from collections import defaultdict
 from ...task_executors.scenario_metrics.dependencies import input_requirements
 from .modeling import derivation_inputs
 from .progress import evidence_key, parameter_requirements
-from .records import Ledger, ResearchResult, current_computation, identity
+from .records import Credit, Ledger, ResearchResult, current_computation, identity
 from .relevance import source_profiles, target_comparison_context
-from .scenario_sharing import applicable_assumptions, independent_groups
+from .scenario_sharing import applicable_assumptions, independent_groups, needed_fields
 
 
 GLOBAL_GOAL_PROGRESS = "global_goal_progress"
 OUTBREAK_OPERATORS = ("cq_from_steady_outbreak", "cq_from_transient_outbreak")
-# A reviewed source relationship is useful learning, but target inputs and outputs
-# remain the principal sources of Goal credit. These weights sum to one.
-GLOBAL_SCORE_WEIGHTS = {"target_routes": 0.225, "target_assumptions": 0.225,
-                        "outbreak_calibration": 0.225, "computed_outputs": 0.225,
-                        "source_target_learning": 0.1}
+GLOBAL_SCORE_WEIGHTS = {"admitted_progress": 1.0}
 
 
 def _route_family(route):
@@ -68,7 +64,7 @@ def _target_routes(ledger, metrics):
                                  "missing_inputs": sorted(inputs - numeric),
                                  "missing_conditions": sorted(needed_conditions - conditions)})
         chosen = max(alternatives, key=lambda row: (row["fraction"], row["met"], row["route"])) if alternatives else None
-        declared_needs = set(scenario.get("assumption_needs", ()))
+        declared_needs = needed_fields(scenario)
         fulfilled_needs = declared_needs & {
             assumption["field"] for assumption, _relation in applicable_assumptions(ledger, subject)
             if assumption["field"] in declared_needs
@@ -79,30 +75,6 @@ def _target_routes(ledger, metrics):
                                                      "required": len(declared_needs),
                                                      "fulfilled_fields": sorted(fulfilled_needs)}}
     return targets
-
-
-def _static_source_needs(scenario, metrics):
-    """A stable fallback when a caller did not declare assumption needs."""
-    fixed_numeric = set(scenario.get("fixed_parameters", {}))
-    fixed_conditions = set(scenario.get("fixed_conditions", {}))
-    requirements = input_requirements(metrics, fixed_numeric, fixed_conditions,
-                                      scenario.get("calculation_variables", ()))
-    routes_by_metric = {}
-    for metric in metrics:
-        routes_by_metric[metric] = {_route_family(route): route for route in
-            requirements["unresolved"].get(metric, {}).get("routes", ()) if route.get("regime")}
-    families = set.intersection(*(set(routes) for routes in routes_by_metric.values())) if routes_by_metric else set()
-    alternatives = []
-    for family in families:
-        inputs, conditions = set(), set()
-        for metric in metrics:
-            route = routes_by_metric[metric][family]
-            inputs.update(route["inputs"])
-            inputs.update(item["field"] for item in route.get("parameter_constraints", ()))
-            conditions.update(route["conditions"])
-        missing = (inputs - fixed_numeric) | (conditions - fixed_conditions)
-        alternatives.append((len(missing), family, missing))
-    return set(min(alternatives)[2]) if alternatives else set()
 
 
 def _calibration_readiness(ledger):
@@ -205,9 +177,7 @@ def scientific_goal_status(result, metrics):
                        for alternative in row["alternatives"]]
     route_score = sum(route_fractions) / len(route_fractions) if route_fractions else 0.0
     for subject, row in targets.items():
-        scenario = ledger.scenarios[subject]
-        needs = set(scenario.get("assumption_needs", ())) or _static_source_needs(scenario, metrics)
-        row["needs"] = sorted(needs)
+        row["needs"] = sorted(needed_fields(ledger.scenarios[subject]))
     source_learning = _source_target_learning(result, ledger, targets)
     target_inputs = {}
     for subject, row in targets.items():
@@ -248,12 +218,13 @@ def scientific_goal_status(result, metrics):
     required_target_inputs = len(independent)
     assumption_coverage = {"fulfilled": sum(row["reviewed"] for row in independent),
                            "required": len(independent)}
-    scores = {"target_routes": route_score,
-              "target_assumptions": (assumption_coverage["fulfilled"] / assumption_coverage["required"]
-                                     if assumption_coverage["required"] else 0.0),
-              "outbreak_calibration": (calibration["best_route"] or {}).get("fraction", 0.0),
-              "computed_outputs": computed / requested if requested else 0.0,
-              "source_target_learning": source_learning["score"]}
+    from .assumptions import scientific_credit
+    groups = independent_groups(ledger)
+    focus = tuple(sorted({group["parameter"] for group in groups} | set(metrics)))
+    credit = scientific_credit(result, focus, outputs=metrics)
+    components = [{"field": field, "element": element, "points": points}
+                  for field, element, points in credit.qualities]
+    scores = {"admitted_progress": round(sum(row["points"] for row in components), 10)}
     return {"target_routes": targets, "calibration": calibration,
             "target_assumptions": assumption_coverage,
             "recorded_target_inputs": {"recorded": recorded_target_inputs,
@@ -262,6 +233,7 @@ def scientific_goal_status(result, metrics):
             "target_inputs": target_inputs,
             "source_target_learning": source_learning,
             "computed_outputs": computed, "requested_outputs": requested,
+            "credit_components": components,
             "scores": scores,
             "weighted_score": round(sum(scores[name] * weight for name, weight in GLOBAL_SCORE_WEIGHTS.items()), 10),
             "score_weights": dict(GLOBAL_SCORE_WEIGHTS)}
@@ -283,3 +255,9 @@ class ScientificGoalState:
     def commit(self, contribution):
         self.ledger.merge(contribution)
         return self.preview()
+
+    def credit(self, contribution=None):
+        status = self.preview(contribution)
+        return Credit(evaluated=contribution.evaluated if contribution is not None else True,
+                      qualities=((GLOBAL_GOAL_PROGRESS, "admitted_progress", status["weighted_score"]),),
+                      quality_resolution=0.1)

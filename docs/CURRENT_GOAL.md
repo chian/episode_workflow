@@ -173,9 +173,9 @@ or published-number target metric.
   loss of previously valid progress, such as invalidated premises, not simply
   another incomplete return. No cost term or cost-based steering is required.
 - At numerical stopping, return the best current three-quantity results for each
-  selected case, with explicit missing results and evidence status. Do not call
-  an operational limit scientific convergence, and do not equate stopping or
-  populated fields with successful completion.
+  selected case, with explicit missing results and evidence status. There is no
+  model-call or unit budget; do not equate stopping or populated fields with
+  successful completion.
 
 ## Acceptance And Failure Boundary
 

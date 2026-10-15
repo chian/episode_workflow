@@ -1,8 +1,9 @@
 """Selectable deterministic calculations; admission and credit belong to the parent."""
 
 from ...task_executors.scenario_metrics.catalog import METRICS
+from ...task_executors.scenario_metrics.dependencies import input_requirements
 from ...task_executors.scenario_metrics.evaluate import UNITS, evaluate_parameters, output_dependencies
-from ...task_executors.scenario_metrics.exposure import EXPOSURE_OUTPUTS, FIXED_FIELDS, MODEL_VERSION
+from ...task_executors.scenario_metrics.exposure import EXPOSURE_OUTPUTS, MODEL_VERSION
 from .modeling import DERIVATIONS, derivation_inputs, derive_parameter, select_facts
 from .records import Fact, ResearchResult, identity, current_support, current_computation, assumption_claim, assumption_matches
 from .scenarios import check_case_inputs
@@ -49,22 +50,26 @@ def input_options(ledger):
 
 
 def bind_reference_inputs(action, ledger, requested_metrics):
-    """Bind only caller-owned coordinates, before model review and execution."""
+    """Carry caller-owned inputs and conditions into review and execution."""
+    if action.get("action") not in TOOLS or action.get("action") == "compare_predictions_with_observations":
+        return action
+    definition = ledger.scenarios.get(action.get("subject"), {})
+    conditions = action.get("conditions", {})
+    if not isinstance(conditions, dict):
+        return action
+    check_case_inputs(definition, {}, conditions)
+    action = {**action, "conditions": {**definition.get("fixed_conditions", {}), **conditions}}
     allowed = TOOL_METRICS.get(action.get("action"))
     if allowed is None:
         return action
     metrics = action.get("metrics", [name for name in requested_metrics if name in allowed])
     if not isinstance(metrics, list) or any(not isinstance(name, str) or name not in allowed for name in metrics):
         return action
-    definition = ledger.scenarios.get(action.get("subject"), {})
     fixed = definition.get("fixed_parameters", {})
-    required = {field for name in metrics if name in EXPOSURE_OUTPUTS
-                for field in FIXED_FIELDS[EXPOSURE_OUTPUTS[name][0]]}
-    if not required.intersection(fixed):
-        return action
     options = input_options(ledger)
     selected = select_facts(action, options)
     present = {fact.field for fact in selected}
+    required = set(input_requirements(metrics, present, action["conditions"])["unresolved"])
     references = list(action["facts"])
     for field in sorted(required.intersection(fixed) - present):
         matches = [key for key, fact in options.items() if fact.subject == action["subject"]

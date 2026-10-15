@@ -10,10 +10,10 @@ from ...task_executors.scenario_metrics.evaluate import CONDITIONS, DEFAULT_METR
 from .acquisition import StrategySource
 from .admission import extract_and_admit
 from .assumptions import RUBRIC, assess_assumption, assumption_candidate, candidate_response_schema, frame_scenario, text, unassessed_assumption
-from .engine import BudgetExceeded, CONSISTENCY, ResearchLimits, ResearchProviders, ResearchRun, ResearchSource, selected_choice
+from .engine import CONSISTENCY, ResearchLimits, ResearchProviders, ResearchRun, ResearchSource, selected_choice
 from .goal_state import GLOBAL_GOAL_PROGRESS
 from .modeling import DERIVATIONS, review_model, select_facts
-from .records import Ledger, ResearchResult, cited_assessment_evidence, identity
+from .records import Ledger, ResearchResult, assumption_model_view, evidence_summary, identity
 from .report import ResearchReport, scientific_progress
 from .scenarios import initial_scenarios, load_scenarios
 from .tools import TOOLS, TOOL_METRICS, bind_reference_inputs, execute_tool, input_options, tool_options
@@ -76,7 +76,7 @@ def calculation_leaf(source, proposal, staged, context):
         review_failure = None
         try:
             review = review_model(source.run.complete, calculation_action, facts, model_context)
-        except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+        except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
             review_failure = source.failure_result(exc, "model_support_assessment")
             review = {"admit": False, "completed": False, "reason": "Model support assessment did not complete",
                       "limitations": list(review_failure.issues)}
@@ -408,27 +408,49 @@ class InvestigationSource(ResearchSource):
         return identity([candidate.get("subject"), candidate.get("field"), candidate.get("value"),
                          candidate.get("statement") if candidate.get("field") in CONDITIONS else None])
 
+    def inference_options(self):
+        """Inputs retain native fields; the assignment constrains inferred outputs."""
+        return self.ledger.evidence_options(), input_options(self.ledger)
+
     def proposal_schema(self):
         prose = {"type": "string", "minLength": 1}
+        evidence, numeric = self.inference_options()
         schema = GuidelineSource.proposal_schema(self, ledger=self.ledger,
             actions=["evidence_strategy", *self.run.tools], focus=())
+        schema.pop("required")
+        schema["anyOf"] = [{"required": ["action"]},
+                           {"required": ["candidates"], "properties": {"candidates": {"minItems": 1}}}]
+        for condition in schema["allOf"]:
+            if "action" in condition["if"].get("properties", {}):
+                condition["if"]["required"] = ["action"]
         schema["properties"].update({
             "approach": {**prose, "description": "Evidence strategy and its rationale"},
             "objective": {**prose, "description": "Information this strategy must resolve for the parent"},
-            "candidates": {"type": "array", "description": "Your proposed target-case hypotheses for mandatory assessment after the evidence strategy returns. Prose asking the child to propose them does not register candidates. An empty array means no new hypotheses are proposed this iteration.",
+            "candidates": {"type": "array", "description": "Your proposed target-case hypotheses for mandatory assessment. Omit action and supply nonempty candidates to assess in this iteration using accumulated evidence, without another search. With evidence_strategy, assessment follows that child. An empty array proposes no new hypotheses.",
                 "items": candidate_response_schema(
                     scenarios={name: self.ledger.scenarios[name] for name in self.requested_subjects}
-                              if self.run.fixed_scenarios else None)},
+                              if self.run.fixed_scenarios else None, evidence=evidence, numeric_inputs=numeric)},
         })
-        schema["allOf"].append({"if": {"properties": {"action": {"const": "evidence_strategy"}}},
+        schema["allOf"].append({"if": {"required": ["action"], "properties": {"action": {"const": "evidence_strategy"}}},
                                  "then": {"required": ["approach", "objective", "candidates"]}})
         return schema
 
     def propose(self, view):
         self.staged = Ledger(self.ledger.result())
+        evidence, numeric = self.inference_options()
         proposal = self.run.agent(self.inputs(view, operation="propose_investigation_strategy",
-            candidates=list(self.candidates.values()), canonical_fields=UNITS, model_conditions=CONDITIONS,
+            candidates=[assumption_model_view(candidate, evidence_options=evidence, numeric_options=numeric)
+                        for candidate in self.candidates.values()],
+            canonical_fields=UNITS, model_conditions=CONDITIONS,
             allowed_actions=["evidence_strategy", *self.run.tools], tools=self.run.tools,
+            inference_inputs={
+                "evidence_options": {key: {**evidence_summary(record),
+                                           "source_version": record.get("source_version", "")}
+                                     for key, record in evidence.items()},
+                "numeric_options": {key: (fact.semantic_record() if fact.kind == "derived" else fact.as_record())
+                                    for key, fact in numeric.items()},
+                "selection_contract": "Candidate source_refs select these evidence_options; input_refs select these numeric_options. These references identify existing records, not new evidence or permission to relabel a measurement.",
+            },
             calculation_inputs={
                 "numeric_options": {key: {name: value for name, value in fact.semantic_record().items()
                                           if name in {"subject", "field", "value", "unit", "kind"}}
@@ -440,14 +462,24 @@ class InvestigationSource(ResearchSource):
             calculations=tool_options(self.ledger),
             reasonableness_rubric=RUBRIC,
             episode_responsibilities={
-                "this_investigation": "Meet the parent's information contract through evidence strategies and assessed hypotheses. When existing inputs permit a requested calculation, execute its deterministic tool here and share that progress with the whole Goal.",
+                "this_investigation": "Meet the parent's information contract through assessed hypotheses from accumulated evidence and chosen evidence strategies. When existing inputs permit a requested calculation, execute its deterministic tool here and share that progress with the whole Goal.",
                 "strategy_child": "Acquire and synthesize source evidence relevant to the hypotheses and unresolved question. It cannot propose or admit target-case assumptions for this investigation.",
                 "scientific_parent": "Use shared calculation and evidence progress to select the next investigation or calculation.",
             },
             instruction=(
                 "You are the investigation episode, responsible for connecting source evidence to the "
-                "parent's scientific Goal. Choose evidence_strategy to acquire or assess a hypothesis, "
-                "or choose an available calculation tool when selected existing inputs and physically "
+                "parent's scientific Goal. Use the information you already have to infer missing "
+                "parameters: recognize related quantity names, convert units, recast measurements, "
+                "or calculate an estimate from other quantities when the physical reasoning permits it. "
+                "Record each inferred numeric candidate as entry_type=best_guess, with its own "
+                "canonical value and unit, source_refs and input_refs from inference_inputs, the "
+                "reasoning and arithmetic in basis, and any added_assumptions. Preserve the native "
+                "meaning of each source measurement; your inference is a separate parameter claim. "
+                "To submit candidates using accumulated evidence now, omit action and return a "
+                "nonempty candidates array. The normal mandatory assessment follows immediately; "
+                "no new search, tool or child is required. Empty references honestly declare an "
+                "unsupported guess; they do not manufacture evidence. Choose evidence_strategy "
+                "when you need additional evidence, or choose an available calculation tool when selected existing inputs and physically "
                 "applicable conditions can produce a new requested result. A tool choice uses existing "
                 "numeric_options and condition statements; do not put a new hypothesis in tool literals. "
                 "Prefer a newly executable provisional calculation to another long evidence strategy "
@@ -506,7 +538,8 @@ class InvestigationSource(ResearchSource):
                 "approach which requested quantity remains unresolved and what reasoning or evidence "
                 "is needed to form a hypothesis; missing direct measurement alone does not prohibit "
                 "an inferred choice. Null is only for nonnumeric model conditions. "
-                "Mandatory assessment follows every returned strategy and considers supporting and contrary evidence. "
+                "Mandatory assessment follows every candidate-bearing iteration or returned strategy "
+                "and considers accumulated supporting and contrary evidence, including inherited evidence. "
                 "The system has already compared the selected cases and grouped parameter needs "
                 "that can use one value. Propose one candidate for an independent group; do not "
                 "duplicate it across that group's cases. "
@@ -534,20 +567,31 @@ class InvestigationSource(ResearchSource):
                 "Return an instance of the JSON Schema."
             ), response_contract=self.proposal_schema()))
         self.last_proposal = proposal
-        action = selected_choice(proposal.get("action"), ["evidence_strategy", *self.run.tools], "action")
-        if action != "evidence_strategy":
+        action = (selected_choice(proposal["action"], ["evidence_strategy", *self.run.tools], "action")
+                  if "action" in proposal else None)
+        if action is not None and action != "evidence_strategy":
             if proposal.get("candidates"):
                 raise ValueError("A calculation may select only previously recorded hypotheses")
             self.staged = admit_scopes(self.run, proposal, self.ledger.result(), self.context())
             context = {**self.context(), "defined_scenarios": dict(self.staged.scenarios)}
             return calculation_leaf(self, proposal, self.staged, context)
-        approach, objective = text(proposal.get("approach"), "approach"), text(proposal.get("objective"), "objective")
         self.staged = admit_scopes(self.run, proposal, self.ledger.result(), self.context())
         if "candidates" not in proposal:
             raise ValueError("Investigation proposals require a candidates array. Put this episode's hypotheses there; instructions asking its evidence-acquisition child to propose them do not register hypotheses. Use [] when none are proposed.")
         candidates = proposal["candidates"]
-        if not isinstance(candidates, list):
-            raise ValueError("Candidate assumptions must be a list")
+        if not isinstance(candidates, list) or (action is None and not candidates):
+            raise ValueError("Candidate assumptions must be a list, nonempty when no action is selected")
+        for candidate in candidates:
+            if (isinstance(candidate, dict) and candidate.get("field") in UNITS
+                    and candidate.get("entry_type") != "best_guess"):
+                raise ValueError("An inferred numeric candidate must declare entry_type=best_guess")
+            if isinstance(candidate, dict) and candidate.get("entry_type") == "best_guess":
+                if "derivation" in candidate:
+                    raise ValueError("New candidate provenance must select the supplied source_refs and input_refs")
+                for name, options in (("source_refs", evidence), ("input_refs", numeric)):
+                    refs = candidate.get(name)
+                    if not isinstance(refs, list) or any(not isinstance(ref, str) or ref not in options for ref in refs):
+                        raise ValueError(f"Candidate {name} must select this investigation's inference_inputs")
         validated = [assumption_candidate(candidate, self.staged) for candidate in candidates]
         if any(c["field"] not in self.parameter_requirements for c in validated):
             raise ValueError("Candidate assumptions must serve the assigned parameter or its executable dependencies")
@@ -560,7 +604,12 @@ class InvestigationSource(ResearchSource):
             self.run.emit_trace("target_input_candidate", status="proposed_not_admitted",
                 episode_id=self.goal.goal_id, investigated_target_subjects=list(self.requested_subjects),
                 subject=candidate["subject"], field=candidate["field"], value=candidate["value"],
-                unit=candidate["unit"], statement=candidate["statement"], model_calls=self.run.model_calls)
+                unit=candidate["unit"], statement=candidate["statement"],
+                entry_type=candidate.get("entry_type"), derivation=candidate.get("derivation"),
+                model_calls=self.run.model_calls)
+        if action is None:
+            return self.leaf(lambda: self.staged.result(), "inferred_parameters")
+        approach, objective = text(proposal.get("approach"), "approach"), text(proposal.get("objective"), "objective")
         source = StrategySource(self.run, self.staged.result(), approach=approach)
         return self.edge(self.run.child(view, source, "strategy", objective,
             proposal=proposal, contract=self.contract(
@@ -578,14 +627,9 @@ class InvestigationSource(ResearchSource):
             field = candidate["field"]
             options = working.evidence_options()
             current = working.assumptions.get(key)
-            inherited = {identity(e) for e in Ledger(self.initial).evidence_options().values()}
-            retained = {identity(e) for e in cited_assessment_evidence(current).values()} if current else set()
-            if current:
-                retained.update(identity(row["evidence"]) for row in current.get("learning_evidence", ()))
-                retained.update(identity(e) for e in current.get("invalidated_evidence", ()))
             # Cross-field physical evidence can support or contradict a hypothesis.
             # The reviewer, not a field-name filter or proposer, judges relevance.
-            relevant = {k: e for k, e in options.items() if identity(e) not in inherited or identity(e) in retained}
+            relevant = options
             basis_version = identity([candidate, list(relevant.values()), working.scenarios.get(candidate["subject"])])
             if current and current.get("assessment_basis_version") == basis_version:
                 continue
@@ -595,7 +639,7 @@ class InvestigationSource(ResearchSource):
                 assessment.assumptions[0]["assessment_basis_version"] = basis_version
                 working.merge(assessment)
                 assessed += 1
-            except (BudgetExceeded, ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+            except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
                 failed = True
                 failure = self.failure_result(exc, "mandatory_reasonableness_assessment")
                 # An unfinished review is not a new scientific judgment.

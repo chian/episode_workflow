@@ -117,7 +117,7 @@ class AssumptionBranchTests(unittest.TestCase):
                 self.assertEqual(record.unit_records[-1].child.ended_by, "yield_stop")
 
     def test_invalid_stop_action_hits_operational_limit_not_scientific_convergence(self):
-        record, report = self.run_branch(AssumptionAgent(invalid_action=True), limits=AssumptionLimits(max_units=3))
+        record, report = self.run_branch(AssumptionAgent(invalid_action=True), limits=AssumptionLimits())
         self.assertFalse(report.passed)
         branch = record.unit_records[-1].child
         self.assertEqual(branch.ended_by, "source_failed")
@@ -139,7 +139,7 @@ class AssumptionBranchTests(unittest.TestCase):
                 for criterion in answer["criteria"].values():
                     criterion["grade"] = grade
             return answer
-        record, report = self.run_branch(agent, limits=AssumptionLimits(max_units=4))
+        record, report = self.run_branch(agent, limits=AssumptionLimits())
         self.assertFalse(report.passed)
         branch = record.unit_records[-1].child
         self.assertEqual(branch.controller_state.history, (0, 0, .5, .25, 0))
@@ -178,7 +178,7 @@ class AssumptionBranchTests(unittest.TestCase):
         _, report = _run_admit_behavior_assumptions_episode(
             AssumptionAgent(), (SOURCE,), admit_assumption=True,
             target_context={"target_scenario": {"breathing_flow_m3_s": .0002}},
-            assumption_services=AssumptionServices(limits=AssumptionLimits(max_units=4)),
+            assumption_services=AssumptionServices(limits=AssumptionLimits()),
         )
         self.assertFalse(report.passed)
         self.assertIn("cannot override an explicit target constraint", json.dumps(report.as_record()))

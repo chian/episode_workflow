@@ -209,6 +209,9 @@ def select_metric(name, conditions):
 def metric_conditions(name, *, regime=None):
     if name not in METRICS:
         return set()
+    if name == "jet_dilution_ratio":
+        # Local dilution has no well-mixed-room or recipient-breathing input.
+        return {"continuous_unmasked_jet"}
     regime = regime or METRICS[name].regime
     needed = {"well_mixed", "single_infectious_source", "uniform_breathing_and_masks"}
     if regime.startswith("exposure_"):

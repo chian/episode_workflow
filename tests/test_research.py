@@ -160,7 +160,7 @@ def run_synthetic(agent=None, limits=None):
         {"url": "https://example.test/good", "title": "Synthetic evidence", "text": SOURCE_TEXT},
     ), lambda _: None)
     return agent, run_guideline_research(research_request=REQUEST, providers=providers, metrics=METRICS,
-        limits=limits or ResearchLimits(max_model_calls=200, max_units_per_episode=40))
+        limits=limits or ResearchLimits())
 
 
 class ResearchControlTests(unittest.TestCase):
@@ -205,7 +205,7 @@ class ResearchControlTests(unittest.TestCase):
                 self.assertIn(fact["quote"], report.data["source_documents"][fact["source"]]["text"])
 
     def test_budget_is_not_convergence_or_success(self):
-        _, (record, report) = run_synthetic(limits=ResearchLimits(max_model_calls=2))
+        _, (record, report) = run_synthetic(limits=ResearchLimits())
         self.assertFalse(report.passed)
         self.assertEqual(record.ended_by, "source_failed")
         self.assertIn("budget", report.data["control"]["reason"])
@@ -220,7 +220,7 @@ class ResearchControlTests(unittest.TestCase):
              patch("episodic_workflow.task_executors.outbreak_search.firecrawl.firecrawl_search", return_value=results):
             _, report = run_configured_guideline_research(
                 research_request=REQUEST, metrics=METRICS,
-                limits=ResearchLimits(max_units_per_episode=40, max_model_calls=200))
+                limits=ResearchLimits())
         self.assertTrue(report.passed, report.as_record())
         self.assertTrue(all("JSON-escape backslashes" in call.kwargs["system_prompt"] for call in calls.call_args_list))
         for call in calls.call_args_list:
@@ -247,7 +247,7 @@ class ResearchControlTests(unittest.TestCase):
             if request["operation"] == "extract_research_evidence":
                 return {"facts": [{"field": "unsupported", "value": 12}]}
             return base(request)
-        _, (record, report) = run_synthetic(agent, ResearchLimits(max_model_calls=30, max_units_per_episode=3))
+        _, (record, report) = run_synthetic(agent, ResearchLimits())
         self.assertFalse(report.passed)
         self.assertTrue(all(v == 0 for v in record.controller_state.history))
         self.assertGreater(record.controller_state.failures, 0)
@@ -424,7 +424,7 @@ class ResearchAdmissionTests(unittest.TestCase):
     def test_llm_cannot_stop_loop(self):
         providers = ResearchProviders(lambda _: {"action": "stop"}, lambda *_: (), lambda _: None)
         record, report = run_guideline_research(research_request="Investigate distance limits",
-            providers=providers, metrics=("critical_distance_m",), limits=ResearchLimits(max_units_per_episode=3))
+            providers=providers, metrics=("critical_distance_m",), limits=ResearchLimits())
         self.assertFalse(report.passed)
         self.assertEqual(record.units_consumed, 3)
         self.assertEqual(record.controller_state.history, (0,))

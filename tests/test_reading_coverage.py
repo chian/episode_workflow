@@ -70,7 +70,7 @@ class ReadingCoverageTests(unittest.TestCase):
 
     def test_selected_table_rows_are_not_examined_when_extraction_cannot_start(self):
         run = ResearchRun(ResearchProviders(lambda _: {"rows": ["table:1:row:1"], "question": "Synthetic row"},
-            lambda *_: (), lambda _: None), ResearchLimits(max_model_calls=1), "Synthetic task", ("mouth_area_m2",))
+            lambda *_: (), lambda _: None), ResearchLimits(), "Synthetic task", ("mouth_area_m2",))
         document = Document("https://example.test/table", "Fixture", "| Area | Value |\n| --- | --- |\n| A | 2 |\n", 600)
         _, result = execute_binding(run, SourceTableSource(run, (), document=document, table=document.tables[0]), "source_table")
         coverage = reading_coverage(result.reading_attempts)[0]
@@ -94,7 +94,7 @@ class ReadingCoverageTests(unittest.TestCase):
         prior = {**attempt(version=document.sha256, ranges=((0, 500),)), "document_characters": len(text)}
         source = PageSource(run, ResearchResult(reading_attempts=(prior,)),
             candidate={"url": document.source, "text": text})
-        run.limits = ResearchLimits(max_model_calls=3, text_window_chars=600)
+        run.limits = ResearchLimits(text_window_chars=600)
         _, result = execute_binding(run, source, "page")
         proposal = requests[0]
         self.assertEqual(proposal["source_summary"]["next_document_order_start"], 0)

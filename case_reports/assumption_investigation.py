@@ -20,8 +20,6 @@ from .research.records import Credit, Ledger, ResearchMessage, ResearchResult
 
 @dataclass(frozen=True)
 class AssumptionLimits:
-    max_model_calls: int = 40
-    max_units: int = 16
     yield_window: int = 4
     text_window_chars: int = 12000
 
@@ -31,10 +29,6 @@ class AssumptionLimits:
                 raise ValueError(f"{name} must be a positive integer")
         if self.yield_window < 2 or self.text_window_chars < 100:
             raise ValueError("Invalid assumption investigation limits")
-
-
-class AssumptionBudgetExceeded(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -110,8 +104,6 @@ class AssumptionInvestigation:
         return {self.grain: (self.evidence_grain, self.assessment_grain)}
 
     def agent(self, request):
-        if self.calls >= self.limits.max_model_calls:
-            raise AssumptionBudgetExceeded("assumption_model_call_budget_exhausted")
         if self.llm is None:
             raise ValueError("Assumption investigation requires an LLM provider")
         self.calls += 1
@@ -202,17 +194,11 @@ class AssumptionSource:
             try:
                 return function()
             except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
-                if isinstance(exc, AssumptionBudgetExceeded):
-                    self.failure = str(exc)
                 return ResearchResult(evaluated=False, issues=(f"{label}: {type(exc).__name__}: {exc}",))
         return Leaf(None, execute, lambda _, result: self.receive(result), label)
 
     def next(self, view):
         if self.failure:
-            return SourceEnd("source_failed")
-        if view.units_consumed >= self.branch.limits.max_units or self.branch.calls >= self.branch.limits.max_model_calls:
-            self.failure = "assumption_operational_budget_exhausted_not_convergence"
-            self.ledger.issues.append(self.failure)
             return SourceEnd("source_failed")
         try:
             return self.propose(view)

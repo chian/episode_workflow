@@ -5,7 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
+import tempfile
+from datetime import datetime, timezone
+import uuid
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
@@ -15,6 +19,8 @@ from .configured_providers import (
     ProviderConfigurationError,
     run_configured_safety_guideline_request,
 )
+from .checkpoint import CheckpointError, CheckpointJournal
+from .method_loop.reconstruction import ReconstructionError
 
 
 def main(
@@ -32,14 +38,64 @@ def main(
         args = _parser().parse_args(argv)
         if args.target_scenario is not None or args.scenarios_file is not None or args.source_url or args.legacy_workflow:
             raise ProviderConfigurationError("Legacy input bypasses and seeded sources are disabled. Use --scenario for caller-defined cases; answers and evidence cannot be supplied.")
-        if not args.disease:
-            raise ProviderConfigurationError("Supply the disease of interest; no disease is built in")
-        request = Path(args.request_file).read_text() if args.request_file else ""
         from .case_reports.research import ResearchLimits
-        limits = ResearchLimits(**{name: getattr(args, name) for name in (
-            "max_model_calls", "max_total_units", "text_window_chars", "yield_window")})
+        from .case_reports.research.scenarios import load_scenarios
         with ExitStack() as streams:
-            trace_stream = streams.enter_context(Path(args.trace_path).open("x")) if args.trace_path else None
+            if args.fork_checkpoint and (args.resume or not args.checkpoint_path):
+                raise CheckpointError("A compatible fork requires a new --checkpoint-path and cannot use --resume")
+            if not args.fork_checkpoint and (args.fork_through_record is not None or args.fork_reason or args.fork_allow_changed):
+                raise CheckpointError("Fork admission options require --fork-checkpoint")
+            if args.resume and args.checkpoint_path:
+                raise CheckpointError("Use --resume for an existing checkpoint, not --checkpoint-path")
+            checkpoint = streams.enter_context(CheckpointJournal(args.resume, resume=True)) if args.resume else None
+            if args.fork_checkpoint:
+                checkpoint = streams.enter_context(CheckpointJournal(args.checkpoint_path,
+                    fork_from=args.fork_checkpoint, through_record=args.fork_through_record,
+                    allowed_changes=args.fork_allow_changed, fork_reason=args.fork_reason))
+            saved = checkpoint.inputs if checkpoint is not None else {}
+            for name, default in (("disease", None), ("scenario", "bazant-bush"), ("search_limit", 10),
+                                  ("text_window_chars", ResearchLimits().text_window_chars),
+                                  ("yield_window", ResearchLimits().yield_window), ("metric", None)):
+                if getattr(args, name) is None:
+                    setattr(args, name, saved.get(name, default))
+            if not args.disease:
+                raise ProviderConfigurationError("Supply the disease of interest; no disease is built in")
+            request = Path(args.request_file).read_text() if args.request_file else saved.get("research_request", "")
+            if Path(args.scenario).is_file():
+                args.scenario = str(Path(args.scenario).resolve())
+            inputs = {name: getattr(args, name) for name in (
+                "disease", "scenario", "search_limit", "text_window_chars", "yield_window", "metric")}
+            inputs.update(research_request=request,
+                          scenario_definitions=[case.as_record() for case in load_scenarios(args.scenario)])
+            if checkpoint is None:
+                path = args.checkpoint_path or str(Path(".artifacts/checkpoints") /
+                    (datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]))
+                checkpoint = streams.enter_context(CheckpointJournal(path, inputs=inputs))
+            elif inputs != checkpoint.inputs:
+                raise CheckpointError("Checkpoint runtime inputs or scenario definitions differ from this invocation")
+            checkpoint.authorize = lambda: {"authorized": True, "mechanism": "explicit_cli_fork" if args.fork_checkpoint else "explicit_cli_resume",
+                "checkpoint": str(checkpoint.path), "exclusive_writer_lock": True}
+            print(f"Checkpoint: {checkpoint.path}" + (f"; reconstructing {checkpoint.replay_count} saved frames" if args.resume or args.fork_checkpoint else ""),
+                  file=err, flush=True)
+            limits = ResearchLimits(**{name: getattr(args, name) for name in (
+                "text_window_chars", "yield_window")})
+            trace_path = Path(args.trace_path) if args.trace_path else checkpoint.path / "trace.jsonl"
+            audit_path = Path(args.audit_path) if args.audit_path else checkpoint.path / "audit.json"
+            report_path = Path(args.report_path) if args.report_path else checkpoint.path / "report.json"
+            output_paths = [path.resolve() for path in (trace_path, audit_path, report_path)]
+            if len(set(output_paths)) != len(output_paths):
+                raise CheckpointError("Trace, audit and report require distinct output paths")
+            for path in output_paths:
+                if (path in {checkpoint.path / name for name in ("manifest.json", "pending.json", "lock")}
+                        or any(directory in path.parents for directory in
+                               (checkpoint.path / "records", checkpoint.path / "attempts"))):
+                    raise CheckpointError("Output path overlaps checkpoint continuation records")
+                if not path.parent.is_dir():
+                    raise CheckpointError(f"Output directory does not exist: {path.parent}")
+                if path.exists() and (not args.resume or (path != trace_path.resolve()
+                        and checkpoint.manifest["status"] != "complete")):
+                    raise CheckpointError(f"Output already exists: {path}")
+            trace_stream = streams.enter_context(trace_path.open("a" if args.resume else "x"))
 
             def trace_event(event):
                 print(json.dumps(_json_record(event), allow_nan=False), file=trace_stream, flush=True)
@@ -49,24 +105,28 @@ def main(
                 transmission_model=args.transmission_model, search_limit=args.search_limit,
                 require_transmissibility_evidence=args.require_transmissibility_evidence,
                 progress=args.progress, trace_event=trace_event if trace_stream is not None else None,
-                metrics=args.metric, limits=limits,
+                metrics=args.metric, limits=limits, checkpoint=checkpoint,
             )
-        if args.audit_path:
-            Path(args.audit_path).write_text(json.dumps(_json_record(record.as_record()), indent=2, allow_nan=False) + "\n")
-        if args.report_path:
-            content = _markdown(report) if args.format == "markdown" else json.dumps(_json_record(report.as_record()), indent=args.indent, allow_nan=False)
-            with Path(args.report_path).open("x") as stream:
-                stream.write(content + "\n")
-    except (ProviderConfigurationError, ValueError, OSError) as exc:
+            report_record = {**_json_record(report.as_record()), "checkpoint": checkpoint.provenance()}
+            checkpoint.event({"event": "workflow_completed", "audit": _json_record(record.as_record()),
+                              "report": report_record})
+            checkpoint.complete()
+            _write_result(audit_path, json.dumps(_json_record(record.as_record()), indent=2, allow_nan=False) + "\n", resume=bool(args.resume))
+            content = (_markdown(report) + "\nCheckpoint: " + str(checkpoint.path) + "\n" +
+                       "```json\n" + json.dumps(checkpoint.provenance(), indent=2) + "\n```"
+                       if args.format == "markdown" else json.dumps(report_record, indent=args.indent, allow_nan=False))
+            _write_result(report_path, content + "\n", resume=bool(args.resume))
+    except (ProviderConfigurationError, CheckpointError, ReconstructionError, ValueError, OSError) as exc:
+        checkpoint_failure = isinstance(exc, (CheckpointError, ReconstructionError))
         print(
             json.dumps(
                 {
                     "passed": False,
                     "errors": [
                         {
-                            "child": "configured_providers",
-                            "field": "environment",
-                            "code": "configuration_error",
+                            "child": "checkpoint" if checkpoint_failure else "configured_providers",
+                            "field": "continuation" if checkpoint_failure else "environment",
+                            "code": "checkpoint_error" if checkpoint_failure else "configuration_error",
                             "message": str(exc),
                         }
                     ],
@@ -79,11 +139,11 @@ def main(
         return 2
 
     if args.format == "markdown":
-        print(_markdown(report), file=out)
+        print(content, file=out)
         return 0 if report.passed else 1
     print(
         json.dumps(
-            _json_record(report.as_record()),
+            report_record,
             indent=args.indent,
             sort_keys=True,
             allow_nan=False,
@@ -91,6 +151,26 @@ def main(
         file=out,
     )
     return 0 if report.passed else 1
+
+
+def _write_result(path, content, *, resume):
+    if resume and path.exists() and path.read_text() == content:
+        return
+    fd, temporary = tempfile.mkstemp(prefix=".result-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Atomic publication without overwriting another result or a prior run.
+        os.link(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        os.unlink(temporary)
 
 
 def _json_record(value: Any) -> Any:
@@ -135,12 +215,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Disease of interest; there is no default pathogen.",
     )
     parser.add_argument("--request-file", help="Optional additional natural-language instructions, without supplied scientific answers.")
-    parser.add_argument("--scenario", default="bazant-bush",
+    parser.add_argument("--scenario",
                         help="Caller-selected cases: bazant-bush (default), classroom, nursing-home, a built-in case name, or a scenario JSON file.")
     parser.add_argument(
         "--search-limit",
         type=int,
-        default=10,
+        default=None,
         help="Maximum Firecrawl results requested from each scoped query.",
     )
     parser.add_argument("--target-scenario", help=argparse.SUPPRESS)
@@ -151,8 +231,14 @@ def _parser() -> argparse.ArgumentParser:
     from .task_executors.scenario_metrics.evaluate import DEFAULT_METRICS
     from .case_reports.research import ResearchLimits
     parser.add_argument("--metric", action="append", choices=DEFAULT_METRICS, help=argparse.SUPPRESS)
-    for name in ("max_model_calls", "max_total_units", "text_window_chars", "yield_window"):
-        parser.add_argument("--" + name.replace("_", "-"), type=int, default=getattr(ResearchLimits(), name))
+    for name in ("text_window_chars", "yield_window"):
+        parser.add_argument("--" + name.replace("_", "-"), type=int)
+    parser.add_argument("--checkpoint-path", help="New durable checkpoint directory (default: a unique directory under .artifacts/checkpoints).")
+    parser.add_argument("--resume", metavar="CHECKPOINT", help="Continue this exact interrupted run by verified local reconstruction; saved provider responses are not requested again.")
+    parser.add_argument("--fork-checkpoint", metavar="CHECKPOINT", help="Create an explicitly admitted changed-code experiment from an immutable saved unit prefix; not ordinary resume.")
+    parser.add_argument("--fork-through-record", type=int, help="Exact committed unit-completion record ending the reused prefix; not a run limit.")
+    parser.add_argument("--fork-allow-changed", action="append", default=[], metavar="PATH", help="Explicitly admit each changed implementation file; must exactly match the detected change set.")
+    parser.add_argument("--fork-reason", help="Compatibility rationale recorded with the immutable parent and old/new implementation identities.")
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument("--audit-path", help="Write the complete recursive episode trace, contracts, and numerical verdicts.")
     parser.add_argument("--trace-path", help="Stream model/provider attempts and credit verdicts as JSON Lines to a new file.")

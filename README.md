@@ -120,8 +120,7 @@ plans. Calculations can now select recorded guesses with no supporting evidence;
 support affects credit and report qualification, not permission to compute.
 The deeper V8 study found relevant extracted information lost before mandatory
 review, not simply an inability to find it. Interrupted review now preserves
-that discovery for parent decisions without admitting it as evidence. Local
-allowances permit completion of started units under the global cap.
+that discovery for parent decisions without admitting it as evidence.
 V9 exposed further interface and credit defects. Tool schemas now scope output
 names to the selected calculator. Reassessing an unchanged claim no longer
 invalidates its calculation, and each output's support follows its actual
@@ -204,7 +203,12 @@ workflow investigates the remaining assumptions and their evidence. Optional
 `--request-file` supplies additional instructions, not researched answers or
 seeded evidence.
 
-Before any research action, a reasoning call extracts the differing contextual
+Before any research action, the initial parameter list is built from the
+executable dependencies of the requested outputs plus explicit scenario needs.
+It includes alternative ways to obtain calculation inputs, not a requirement
+to fill every alternative before calculating. Caller-fixed inputs and values
+derivable entirely from those inputs are excluded from evidence acquisition.
+A reasoning call then extracts the differing contextual
 features in the selected scenario descriptions and identifies which declared
 features and fixed inputs can change each needed parameter's own value. The
 system groups cases with the same values for those relevant features. These
@@ -213,10 +217,13 @@ assignment. The assessment records its factors and rationale; no case name or
 scenario-specific transfer rule is embedded in the code. A value proposed for
 any group member can appear as a calculation option in the other members
 without adding duplicate assumptions. Changes to a scenario or the value's
-review invalidate the applicable link. After every episode verdict, group-based
-value coverage and route readiness update their global credit components
-(0.225 each); root credit is projected from the shared ledger even when a child
-has not returned to it.
+review invalidate the applicable link. The sharing judge must cover every
+supplied parameter; it groups values but cannot remove required inputs from
+credit eligibility. Parameter credit uses the same rule for each group: one
+point for admitted evidence-linked learning, plus 0.1 for each distinct
+additional supporting source. Fixed scenario givens earn no evidence credit.
+Root credit is projected from the shared ledger even when a child has not
+returned to it.
 
 The built-in cases use the selected six-foot separation
 (`neighbor_distance_m = 1.8288`) and fifteen-minute duration
@@ -239,10 +246,9 @@ pipeline. Recorded numerical hypotheses can be calculated before justification.
 Their inputs and support gaps remain explicit; calculation alone supplies no
 empirical support or supported-output credit.
 
-`--max-model-calls` and `--max-total-units` bound the whole run;
-`--search-limit` bounds the result set for each query. There is no per-episode
-unit cap. `--yield-window` configures numerical marginal-yield stopping.
-Hitting a whole-run operational bound is not convergence.
+`--search-limit` bounds the result set for each query. There is no model-call,
+whole-run unit, or per-episode unit budget. `--yield-window` configures numerical
+marginal-yield stopping.
 `--text-window-chars` bounds individual reading executions, not document length.
 
 Exit codes: `0` when every required quantity has a coherent supported conditional
@@ -262,11 +268,38 @@ explicit negligible-near-field hypothesis removes the local contribution from
 all three operations; otherwise the unmasked-jet model applies. A transient
 background plus a local jet requires the additional `quasi_steady_local_plume`
 approximation. Its applicability is investigated, not silently assumed.
-Report files are not overwritten.
-The optional trace is written incrementally to a new JSON Lines file. It retains
+Report files are not overwritten. Each CLI run creates a durable checkpoint and
+stores its trace, audit and report there unless explicit output paths are given.
+The trace is written incrementally as JSON Lines. It retains
 actual model requests, responses, provider outcomes and credit verdicts, not
 just operation names. Like the final report and audit, it can contain retrieved
 source content and should be treated as a local research artifact.
+
+### Checkpoint And Resume
+
+Every new CLI run prints its checkpoint directory. Choose a stable location with
+`--checkpoint-path .artifacts/checkpoints/my-run`. Continue the exact saved run:
+
+```bash
+python3 . --resume .artifacts/checkpoints/my-run --progress
+```
+
+The disease, scenario, request and control settings are restored from the saved
+registration. Explicitly changing them is rejected. Resume requires the same
+code, Python runtime and non-secret provider configuration; credentials are
+loaded afresh and are not stored. Completed provider responses and failures are
+replayed locally in their original nested execution order. This rebuilds
+evidence, assumptions, calculations, selected actions, reading positions,
+contracts and controller histories before new work is authorized. It does not
+restart research or merely restore the root score. Only an interrupted request
+without a committed response may be retried; these providers perform
+observational search, retrieval or model inference, not remote writes.
+
+The implementation follows OpenChia's ordered reconstruction mechanism, copied
+and adapted locally: Episode start/unit/completion frames, a read-only
+`ReconstructionCursor`, stable logical identity, physical-attempt lineage and a
+separate host `run_reconstructed` admission. There are no cross-repository
+imports. See [checkpoint guarantees and boundaries](docs/CHECKPOINTS.md).
 
 ## Architecture
 

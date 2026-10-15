@@ -61,26 +61,24 @@ def _plain_value(value):
 
 
 def target_comparison_context(definition, assumptions):
-    """Target givens and distinct recorded hypotheses, with their review states."""
-    target = {name: _plain_value(definition.get(name, {} if name != "assumption_needs" else []))
-              for name in ("description", "fixed_parameters", "fixed_conditions", "assumption_needs")}
-    hypotheses = {}
-    for assumption in assumptions:
-        if (assumption.get("subject") == definition.get("subject")
-                and assumption.get("role") not in {"scenario_constraint", "request_constraint"}
-                and assumption.get("review", {}).get("verdict") != "contradicted"):
-            row = {
-                "value": assumption["value"], "unit": assumption["unit"],
-                "statement": assumption["statement"],
-                "review_verdict": assumption.get("review", {}).get("verdict", "unassessed")}
-            hypotheses.setdefault(assumption["field"], {})[identity(row)] = row
-    target["recorded_hypotheses"] = {field: [rows[key] for key in sorted(rows)]
-                                      for field, rows in hypotheses.items()}
-    return target
+    """Compare source applicability to scenario inputs, not candidate wording."""
+    return {name: _plain_value(definition.get(name, {} if name != "assumption_needs" else []))
+            for name in ("description", "fixed_parameters", "fixed_conditions", "assumption_needs")}
+
+
+def _unchanged_relationships(source, profiles, targets, parameter, relationships):
+    """Reuse an assessment only for the same admitted profile and assigned target."""
+    return {(row["source_subject"], row["target_subject"]): row for row in relationships
+            if row.get("source") == source and row.get("parameter") == parameter
+            and (source, row.get("source_subject")) in profiles
+            and row.get("target_subject") in targets
+            and row.get("source_profile_version") == identity(profiles[(source, row["source_subject"])])
+            and row.get("target_version") == identity(targets[row["target_subject"]])}
 
 
 def assess_source_types_with_jev(agent, jev_assess, source, profiles, targets,
-                                 known_groups, disease=None, *, parameter=None):
+                                 known_groups, disease=None, *, parameter=None,
+                                 previous_relationships=()):
     """Group observed events, then score each source/target pair with a Noul."""
     subjects = sorted(subject for locator, subject in profiles if locator == source)
     if not subjects:
@@ -123,16 +121,23 @@ def assess_source_types_with_jev(agent, jev_assess, source, profiles, targets,
                    for group in groups)):
         raise ValueError("Source-event classification has an invalid type or basis")
 
+    unchanged = _unchanged_relationships(source, profiles, targets, parameter, previous_relationships)
     relationships = []
     scores = {}
     for subject in subjects:
         profile = profiles[(source, subject)]
-        probabilities = jev_assess({"source": source, "source_subject": subject,
-            "source_profile": profile, "target_scenarios": targets,
-            "disease_of_interest": disease, "parameter": parameter})
-        if not isinstance(probabilities, Mapping) or set(probabilities) != set(targets):
+        changed_targets = {name: target for name, target in targets.items() if (subject, name) not in unchanged}
+        probabilities = (jev_assess({"source": source, "source_subject": subject,
+            "source_profile": profile, "target_scenarios": changed_targets,
+            "disease_of_interest": disease, "parameter": parameter}) if changed_targets else {})
+        if not isinstance(probabilities, Mapping) or set(probabilities) != set(changed_targets):
             raise ValueError("Jev source-target assessment must cover selected targets")
         for target_subject, target in targets.items():
+            if (subject, target_subject) in unchanged:
+                relation = unchanged[(subject, target_subject)]
+                scores[(subject, target_subject)] = relation["score"]
+                relationships.append(relation)
+                continue
             probability = probabilities[target_subject]
             if (isinstance(probability, bool) or not isinstance(probability, (int, float))
                     or not 0 <= probability <= 1):
@@ -161,13 +166,15 @@ def assess_source_types_with_jev(agent, jev_assess, source, profiles, targets,
             for subject in group["subjects"]) for target in targets}} for group in groups], relationships
 
 
-def assess_source_types(agent, source, profiles, targets, known_groups, disease=None, *, parameter=None):
+def assess_source_types(agent, source, profiles, targets, known_groups, disease=None, *, parameter=None,
+                        previous_relationships=()):
     """Classify one source's observed subjects against reusable event types."""
     subjects = sorted(subject for locator, subject in profiles if locator == source)
     if not subjects:
         return []
     existing = sorted(known_groups)
-    expected = {(subject, target) for subject in subjects for target in targets}
+    unchanged = _unchanged_relationships(source, profiles, targets, parameter, previous_relationships)
+    expected = {(subject, target) for subject in subjects for target in targets} - unchanged.keys()
     variables = {(subject, target): comparison_variables(profiles[(source, subject)], targets[target])
                  for subject, target in expected}
     response = agent({
@@ -177,8 +184,10 @@ def assess_source_types(agent, source, profiles, targets, known_groups, disease=
         "target_scenarios": targets,
         "disease_of_interest": disease,
         "assigned_parameter": parameter,
-        "comparison_variables": {subject: {target: list(variables[(subject, target)]) for target in targets}
+        "comparison_variables": {subject: {target: list(variables[(subject, target)]) for target in targets
+                                           if (subject, target) in expected}
                                  for subject in subjects},
+        "unchanged_relationships": list(unchanged.values()),
         "known_types": {key: {name: group[name] for name in ("description", "target_relevance", "basis")}
                         for key, group in known_groups.items()},
         "instruction": (
@@ -187,7 +196,8 @@ def assess_source_types(agent, source, profiles, targets, known_groups, disease=
             "The same actual event may have several source subject labels; retain their separate records. "
             "Do not merge distinct events into one observation or treat a model sensitivity case as a measured outbreak. "
             "For each type, assess how relevant its context is to each target scenario. Also assess "
-            "each actual source subject against every target for the assigned parameter. For each "
+            "each source-subject/target pair listed in comparison_variables for the assigned parameter. "
+            "Unchanged relationships already have an assessment; retain them without reassessment. For each "
             "pair, compare exactly its declared comparison_variables. Use match, partial, mismatch, "
             "unknown or not_applicable and explain each comparison from the supplied source and "
             "target context. Unknown is not a mismatch. Do not invent values or treat target inputs "
@@ -198,8 +208,8 @@ def assess_source_types(agent, source, profiles, targets, known_groups, disease=
             "0.5 for a related mechanism with major transfer differences, 0.75 for a close but qualified match, "
             "and 1 only for a directly matching context. A related type remains available even at low relevance; "
             "an explicit, reviewed transfer is still needed before target calculations use its values. "
-            "Return every supplied subject exactly once in a group and every source-subject/target "
-            "pair exactly once in relationships."
+            "Return every supplied subject exactly once in a group and every pair listed in "
+            "comparison_variables exactly once in relationships, excluding unchanged_relationships."
         ),
         "response_contract": {"type": "object", "additionalProperties": False,
             "required": ["groups", "relationships"], "properties": {"groups": {"type": "array", "items": {
@@ -259,7 +269,7 @@ def assess_source_types(agent, source, profiles, targets, known_groups, disease=
     if not isinstance(relationships, list) or len(relationships) != len(expected):
         raise ValueError("Source-event relationships must cover every source/target pair")
     seen = set()
-    admitted = []
+    admitted = list(unchanged.values())
     for row in relationships:
         if not isinstance(row, dict):
             raise ValueError("Source-event relationship must be an object")
@@ -301,7 +311,9 @@ def assess_source_types(agent, source, profiles, targets, known_groups, disease=
                          "target_fixed_conditions": target.get("fixed_conditions", {}),
                          "comparisons": enriched,
                          "known": known, "considered": considered})
-    return groups, admitted
+    scores = {(row["source_subject"], row["target_subject"]): row["score"] for row in admitted}
+    return [{**group, "target_relevance": {target: max(scores[(subject, target)]
+            for subject in group["subjects"]) for target in targets}} for group in groups], admitted
 
 
 def target_relevance_credit(result, requirements, groups, targets, *, parameter=None):
@@ -317,7 +329,7 @@ def target_relevance_credit(result, requirements, groups, targets, *, parameter=
         for type_id, group in groups.items():
             if not group["members"]:
                 continue
-            members = {tuple(member) for member in group["members"]}
+            members = sorted({tuple(member) for member in group["members"]})
             assessed_members = [relationships[(source, subject, target, parameter)] for source, subject in members
                                 if (source, subject, target, parameter) in relationships]
             if assessed_members:

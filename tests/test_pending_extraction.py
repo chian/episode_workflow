@@ -30,7 +30,7 @@ def extraction():
 
 def read_once(agent, *, calls=2, deadline=None, text=TEXT):
     run = ResearchRun(ResearchProviders(agent, lambda *_: (), lambda _: None),
-        ResearchLimits(max_model_calls=calls, text_window_chars=600), "Synthetic incomplete-review test", (FIELD,))
+        ResearchLimits(text_window_chars=600), "Synthetic incomplete-review test", (FIELD,))
     document = Document("https://example.test/fixture", "Synthetic fixture", text, 600)
     source = ReportSource(run, (), document=document)
     episode = run.episode("report", source,
@@ -94,7 +94,7 @@ class PendingExtractionTests(unittest.TestCase):
                 self.assertFalse(result.evaluated)
                 self.assertFalse(source.document.processed)
                 self.assertEqual(set(record.controller_state.history), {0})
-                self.assertLessEqual(run.model_calls, run.limits.max_model_calls)
+                self.assertGreaterEqual(run.model_calls, 1)
                 json.dumps(result.as_record(), allow_nan=False)
 
     def test_failed_extraction_does_not_claim_candidates_were_found(self):
@@ -159,7 +159,7 @@ class PendingExtractionTests(unittest.TestCase):
                         return synthetic_synthesis(request)
                     self.fail(op)
                 run = ResearchRun(ResearchProviders(agent, lambda *_: (), lambda _: None),
-                    ResearchLimits(max_model_calls=8), "Synthetic parent communication test", (FIELD,))
+                    ResearchLimits(), "Synthetic parent communication test", (FIELD,))
                 source = PageSource(run, (), candidate={"url": "https://example.test/fixture", "text": TEXT})
                 record, result = execute_binding(run, source, "page")
                 choices = [r for r in requests if r["operation"] == "propose_page_child"]
