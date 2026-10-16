@@ -6,6 +6,7 @@ risk. Its parent owns the fields and context to be justified.
 
 from dataclasses import dataclass, replace
 import json
+import math
 from collections.abc import Mapping
 
 from ..credit_assignment.research import ResearchController
@@ -13,9 +14,11 @@ from ..method_loop import (
     ChildEpisodeUnit, Episode, EpisodeGoal, EpisodeRequest, Grain, Leaf,
     ReportContract, SourceEnd,
 )
+from ..method_loop.communication import ParentModelInputError
 from .research.assumptions import RUBRIC, assess_assumption
 from .research.progress import ADDITIONAL_SUPPORT, parameter_support
 from .research.records import Credit, Ledger, ResearchMessage, ResearchResult
+from ..task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS
 
 
 @dataclass(frozen=True)
@@ -53,15 +56,83 @@ def assumption_credit(result, fields):
     ), quality_resolution=ADDITIONAL_SUPPORT)
 
 
-def assumption_summary(result, completion, request):
-    """Return only this branch's contracted facts, without a new synthesis policy."""
+def assumption_summary(result, completion, request, *, evidence_options=None):
+    """Project existing records into the closed legacy child-return contract."""
+    def number(value, *, nullable=False):
+        if value is None and nullable:
+            return None
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("Assumption return requires a finite numeric value")
+        return value
+
     latest = latest_assessments(result)
-    return {
-        "assumptions": [{k: v for k, v in a.items() if k != "key"} for a in latest.values()],
-        "findings": list(result.findings),
-        "unresolved": list(result.issues),
-        "completion": result.stop_reason or completion.ended_by,
+    fields = set(UNITS) | set(CONDITIONS)
+    verdicts = {"unassessed", "supported", "provisional", "unsupported", "contradicted", "fixed_condition"}
+    assumptions = []
+    for field, assessment in latest.items():
+        if field not in fields:
+            continue
+        review = assessment.get("review", {})
+        verdict = review.get("verdict", "unassessed")
+        if not isinstance(verdict, str) or verdict not in verdicts:
+            raise ValueError("Assumption return requires a declared review verdict")
+        completed = review.get("completed", verdict != "unassessed")
+        if type(completed) is not bool:
+            raise ValueError("Assumption return review completion must be boolean")
+        criteria = {}
+        for name in RUBRIC:
+            if name not in review.get("criteria", {}):
+                continue
+            grade = review["criteria"][name]["grade"]
+            if type(grade) is not int or grade not in (0, 1, 2):
+                raise ValueError("Assumption return criterion grades must be 0, 1 or 2")
+            criteria[name] = grade
+        assumptions.append({
+            "field": field, "value": number(assessment["value"], nullable=True), "unit": UNITS.get(field),
+            "verdict": verdict, "reasonableness": number(assessment["reasonableness"]),
+            "review_completed": completed, "criteria": criteria,
+        })
+    failures = []
+    for diagnostic in result.diagnostics:
+        if diagnostic.get("status") != "failed":
+            continue
+        category = diagnostic.get("category")
+        failures.append({
+            "operation": ("parent_model_input" if diagnostic.get("stage") == "parent_model_input"
+                          else "proposal" if diagnostic.get("stage") == "proposal" else "execution"),
+            "status": "failed",
+            "category": category if isinstance(category, str) and category in {
+                "invalid_action_contract", "provider_failure", "malformed_json", "duplicate_json_key",
+                "child_identity_in_parent_input",
+            } else "operation_failed",
+        })
+    ended_by = completion.ended_by if completion is not None else "in_progress"
+    if not isinstance(ended_by, str) or ended_by not in {
+        "exhausted", "yield_stop", "incomplete", "source_failed", "in_progress",
+    }:
+        raise ValueError("Assumption return requires a declared completion code")
+    if type(result.evaluated) is not bool:
+        raise ValueError("Assumption return operation completion must be boolean")
+    report = {
+        "assumptions": assumptions,
+        "numeric_evidence": [{"field": fact.field, "value": number(fact.value),
+            "unit": UNITS[fact.field], "kind": fact.kind}
+            for fact in result.facts if fact.field in UNITS
+            and fact.kind in {"source_observation", "source_model_parameter"}],
+        "evidence_fields": sorted({field for evidence in result.evidence
+                                   for field in evidence.get("fields", ()) if field in fields}),
+        "operation_status": "completed" if result.evaluated else "failed",
+        "failed_operations": failures,
+        "completion": ended_by,
     }
+    if evidence_options is not None:
+        from .research.communication import decision_records
+        catalog = decision_records(Ledger(result), target_subjects=(
+            row["subject"] for row in result.scenarios if row.get("role", "target") == "target"))["evidence"]
+        if list(catalog) != list(evidence_options):
+            raise ValueError("Evidence catalog must preserve the ledger's declared references")
+        report["evidence_options"] = catalog
+    return report
 
 
 def branch_contract(fields, context):
@@ -69,10 +140,12 @@ def branch_contract(fields, context):
         decision=f"Decide whether {', '.join(fields)} can be admitted for this parent's defined context: {context}",
         measurements={"credit": "Reviewed justification, not populated fields or source counts."},
         information={
-            "assumptions": "Current proposed values, reasonableness, evidence, limitations and rejected alternatives.",
-            "findings": "What the evidence establishes for this admission decision.",
-            "unresolved": "Missing support and failed assessments; not instructions for the parent.",
-            "completion": "Numeric yield, exhaustion or operational failure.",
+            "assumptions": "Rows: canonical field, numeric value or null, canonical unit or null, verdict enum (unassessed/supported/provisional/unsupported/contradicted/fixed_condition), numeric reasonableness, review_completed boolean, and numeric rubric criterion grades. No claim or explanatory prose.",
+            "numeric_evidence": "Rows: canonical field, numeric value, canonical unit, and source kind enum (source_observation/source_model_parameter). Source text and provenance remain in scientific records.",
+            "evidence_fields": "Canonical field names addressed by recorded qualitative evidence; presence does not establish support.",
+            "operation_status": "Enum completed/failed for the returned operation; scientific support is separate.",
+            "failed_operations": "Rows: operation enum parent_model_input/proposal/execution, status failed, and category enum child_identity_in_parent_input/invalid_action_contract/provider_failure/malformed_json/duplicate_json_key/operation_failed. child_identity_in_parent_input means request construction failed before model dispatch. Detailed failures remain in audit records.",
+            "completion": "Method completion enum exhausted/yield_stop/incomplete/source_failed; in_progress only for the local state projection.",
         },
     )
 
@@ -179,13 +252,23 @@ class AssumptionSource:
         return self.ledger.result(evaluated=bool(self.evaluated), stop_reason=reason)
 
     def inputs(self, view, **kwargs):
+        scientific_state = assumption_summary(self.ledger.result(), None, None,
+                                             evidence_options=self.ledger.evidence_options())
         return view.model_inputs({
             "objective": view.goal.as_record()["objective"],
             "context": self.branch.context, "fields": list(self.branch.fields),
             "subject": self.branch.subject,
-            "evidence_options": self.ledger.evidence_options(),
-            "assessments": self.ledger.assumption_options(),
-            "findings": self.ledger.findings, "issues": self.ledger.issues,
+            "evidence_options": scientific_state.pop("evidence_options"),
+            "evidence_options_contract": {
+                "references": "evidence:N keys identify the full records supplied to the independent reviewer when selected.",
+                "fields": "Canonical quantities addressed by the record; a relevance tag does not establish a value or support.",
+                "value_and_unit": "Finite scalar in canonical units, or null for qualitative evidence.",
+                "kind_and_role": "Declared source provenance and evidence role; observed_fields names actual observed quantities.",
+                "source_and_subject_references": "Local references distinguish sources and their event or population subjects.",
+                "metadata_presence": "has_quote and has_context indicate retained metadata; presence does not establish support.",
+                "numeric_constraints": "Typed intervals and bounds in canonical units; a range does not automatically supply a selected scalar.",
+            },
+            "scientific_state": scientific_state,
             "credit_history": list(view.controller_state.history), **kwargs,
         }, reports=view.child_reports)
 
@@ -194,17 +277,33 @@ class AssumptionSource:
             try:
                 return function()
             except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
-                return ResearchResult(evaluated=False, issues=(f"{label}: {type(exc).__name__}: {exc}",))
+                return ResearchResult(evaluated=False, diagnostics=({
+                    "stage": label, "status": "failed", "category": "operation_failed",
+                    "why": f"{type(exc).__name__}: {exc}",
+                },))
         return Leaf(None, execute, lambda _, result: self.receive(result), label)
 
     def next(self, view):
         if self.failure:
             return SourceEnd("source_failed")
+        before_calls = self.branch.calls
         try:
             return self.propose(view)
         except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
-            message = f"assumption proposal: {type(exc).__name__}: {exc}"
-            return self.leaf(lambda: ResearchResult(evaluated=False, issues=(message,)), "invalid_proposal")
+            if (isinstance(exc, ParentModelInputError) or
+                    (isinstance(exc, (ValueError, TypeError, KeyError)) and self.branch.calls == before_calls)):
+                self.failure = "invalid_parent_model_input"
+                self.ledger.merge(ResearchResult(evaluated=False, diagnostics=({
+                    "stage": "parent_model_input", "status": "failed",
+                    "category": ("child_identity_in_parent_input" if isinstance(exc, ParentModelInputError)
+                                 else "invalid_action_contract"), "why": str(exc),
+                },)))
+                return SourceEnd("source_failed")
+            result = ResearchResult(evaluated=False, diagnostics=({
+                "stage": "proposal", "status": "failed", "category": "invalid_action_contract",
+                "why": f"{type(exc).__name__}: {exc}",
+            },))
+            return self.leaf(lambda: result, "invalid_proposal")
 
 
 class InvestigationSource(AssumptionSource):
@@ -225,7 +324,7 @@ class InvestigationSource(AssumptionSource):
                 "evidence": ["admitted evidence option keys, including contrary evidence"],
             },
             instruction=(
-                "Resolve the parent's assumption question, using findings and numerical yield history. "
+                "Resolve the parent's assumption question, using structured child reports, scientific state and numerical yield history. "
                 "You may revise the evidence strategy or propose and reassess a candidate. "
                 "An inferred value need not be printed in a source, but requires evidence and a bounded inference. "
                 "Do not invent evidence, redefine the scenario, calculate risk or prescribe an acceptable risk budget. "
@@ -241,18 +340,7 @@ class InvestigationSource(AssumptionSource):
                 raise ValueError("Evidence query must be text")
             source = EvidenceSource(self.branch, self.ledger.result(), query=query, question=objective)
             grain = self.branch.evidence_grain
-            contract = ReportContract(
-                decision=f"Assess assumption reasonableness: {objective}",
-                measurements={"credit": "New admitted evidence relevant to the requested assumptions."},
-                information={"evidence": "Admitted numeric and qualitative passages with applicability.",
-                             "findings": "Supporting or conflicting findings.", "unresolved": "Missing evidence and failed readings.",
-                             "completion": "Actual completion reason."},
-            )
-            synthesis = lambda result, completion, request: {
-                "evidence": list(result.evidence) + [f.semantic_record() for f in result.facts if f.source],
-                "findings": list(result.findings), "unresolved": list(result.issues),
-                "completion": result.stop_reason,
-            }
+            contract = branch_contract(self.branch.fields, self.branch.context)
         elif proposal.get("action") == "assess_assumption":
             if proposal.get("field") not in self.branch.fields:
                 raise ValueError("Candidate field is outside the admission parent's scope")
@@ -263,11 +351,10 @@ class InvestigationSource(AssumptionSource):
             source = AssessmentSource(self.branch, self.ledger.result(), proposal)
             grain = self.branch.assessment_grain
             contract = branch_contract((proposal["field"],), self.branch.context)
-            synthesis = assumption_summary
         else:
             raise ValueError("Unknown assumption action; the agent cannot stop the episode")
         child = self.branch.episode(view, source, grain, objective, contract)
-        return ChildEpisodeUnit(child, self.receive, synthesis)
+        return ChildEpisodeUnit(child, self.receive, assumption_summary)
 
 
 class AssessmentSource(AssumptionSource):

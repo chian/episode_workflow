@@ -101,10 +101,11 @@ the parent chooses when to calculate or investigate, with no prescribed order.
 The new default metric names are `allowable_room_time_s`, `safe_distance_m`,
 `scenario_reproductive_number`, and their `transient_` counterparts. Legacy
 background-only metrics and duration relationships remain available but do not
-satisfy these contracts. Output credit retains the 1/8 provisional floor for
-current contract-matching calculations; stronger support replaces that floor.
-Repeats earn no gain. The assumption rubric and numerical controller are
-unchanged. This follow-up has not been executed or tested.
+satisfy these contracts. Requested-output credit is twice the underlying
+calculation credit: a current accepted output earns at least 0.25 points and up
+to 2 points with full support. Stronger support replaces the floor; repeats earn
+no gain. Intermediate calculation rates, the assumption rubric and the numerical
+controller are unchanged. The credit change has not been verified in a live run.
 
 ```text
 parent goal + parent-owned information contract
@@ -113,7 +114,7 @@ parent goal + parent-owned information contract
   -> mandatory admission/assessment and credit projection
   -> numerical controller verdict and state update
        continue: next proposal receives measured outcomes
-       close: contracted synthesis to the parent
+       close: contracted structured JSON return to the parent
 ```
 
 Only `method_loop.Episode` owns that loop. There is no agent stop action. Each
@@ -134,8 +135,8 @@ own yield histories could govern iteration. Each child now continues through
 the existing method_loop controller, subject to source exhaustion and provider
 failure. There is no model-call, whole-run unit, or per-episode unit budget.
 Model attempts still distinguish proposal
-work from mandatory processing. Synthesis remains commissioned by the invoking
-parent. There is no cost term in credit and no prescribed action sequence.
+work from mandatory processing. The invoking parent declares the structured
+return contract. There is no cost term in credit and no prescribed action sequence.
 
 The root requires an information `objective` for a delegated investigation.
 Deterministic tool choices retain their required `basis`, parameterization,
@@ -174,13 +175,13 @@ calculation and evidence refinement are concurrent scientific needs; completing
 every numerical field is not a prerequisite for revisiting a weak assumption.
 
 Each metric now declares its enforced `parameter_constraints` once. Execution,
-dependency routes, root proposals, reviewers and child synthesis use that same
+dependency routes, root proposals, reviewers and child return records use that same
 contract. An implemented metric name does not mean every case has an applicable
 route: the continuous-jet kernel still excludes masked parameters. New evidence
 can inform a future model extension, but a condition statement cannot add a
-kernel or override its domain. Synthesis must distinguish that implementation
-gap from a missing hypothesis, weak evidence or a physical contradiction, and
-retain useful implications for other cases when evidence has wider relevance.
+kernel or override its domain. Structured calculation statuses and review grades
+distinguish an implementation gap from a missing hypothesis, weak evidence or a
+physical contradiction. The parent interprets their relevance to other cases.
 That capability communication alone did not supply a masked-distance answer or
 add an evidence-quality gate. The subsequent extension below adds an explicit
 alternative without altering the unmasked-jet formula.
@@ -198,7 +199,7 @@ selects the named condition with its parameterization. Conflicting conditions
 cannot be combined. Reported zero is a model-bound interpretation, not safety
 at contact, and the model does not calculate masked leakage or thermal plumes.
 
-Routes expose their own inputs and conditions to proposals and synthesis.
+Routes expose their own inputs and conditions to proposals and calculation records.
 Calculation support follows the actual selected route, including the additional
 physical hypothesis. A transient background with the additive jet requires an
 explicit `quasi_steady_local_plume` assumption: the local flow is immediately
@@ -229,10 +230,10 @@ When independent extraction review cannot finish, the child retains candidate
 records in diagnostic audit, not the evidence catalog. Its compact
 `extraction_state` describes completed deterministic checks, the still-unreviewed
 claims/values, affected fields and locations within the versioned source.
-Synthesis can use that state to explain consequential failure implications;
-it is not appended to the parent's report. A failed synthesis returns only a
-communication-failure notice. Useful discovery awaiting review is neither "nothing found" nor a
-completed scientific rejection, and earns no evidence credit by itself.
+The structured upward return records review completion and operation status;
+candidate audit records are not promoted to admitted parameter results. Useful
+discovery awaiting review is neither "nothing found" nor a completed scientific
+rejection, and earns no evidence credit by itself. No separate synthesis call runs.
 
 Extraction also preserves measurements of ingredients or related systems that
 lack their own numeric model field as qualitative evidence with original numbers,
@@ -307,19 +308,55 @@ full scenario set or its model catalog into their reasoning prompts. The
 method-loop goal retains immutable task ancestry for audit; that does not
 authorize copying the ancestry into model input.
 
-Every upward report contains only `findings`: one brief paragraph synthesizing
-decision-relevant trends, changed understanding, and consequential uncertainty
-or failure implications. It must not contain field checklists, evidence
-inventories, tables, reading offsets, raw diagnostics or the child's transcript.
-The parent receives these reports through `view.model_inputs`, with its own
-previous child returns preserved for steering. A failed synthesis returns a
-compact communication-failure notice, not a raw-data fallback.
+Every upward report is formal JSON with declared terms and definitions:
+
+| Field | Meaning |
+| --- | --- |
+| `parameter_results` | Recorded numbers, units, origin, status and declared references. |
+| `reviews` | Review verdict, completion and criterion grades. |
+| `calculations` | Output statuses, values and units. |
+| `reading_coverage` | Counts of examined, reviewed and remaining material. |
+| `operations` | Closed stage/category/status terms and counts. |
+| `completion` | Runtime `ended_by` and whether work was `evaluated`. |
+
+Existing work-call JSON and runtime records supply these fields. No second
+summary call, findings paragraph, direct child prose message, raw diagnostic
+text or free-form completion reason is returned. The parent receives the records
+through `view.model_inputs`, with previous child returns retained for its next
+decision. An operational stop does not assert that the scientific question is
+resolved.
 
 Detailed admitted evidence, hypotheses, source spans and diagnostics remain in
 the scientific records for numerical projection, calculation, independent
 review and audit. They are not automatically expanded into a parent's next
-decision prompt. Calculation tools still expose their required typed numeric
-input options. Scientific-state transfer is separate from agent communication.
+decision prompt. Target calculation tools bind the current main-table values
+automatically. Scientific-state transfer is separate from agent communication.
+
+Scientific action proposals include `calculation_deferrals` when choosing
+`investigate` or `evidence_strategy`. Each entry names a requested-output row by
+`subject` and `field`, and supplies `reason`, `related_fields`, `route_ref` and
+`error_refs`. Select one or more relevant rows; the episode need not enumerate
+the table. An empty array is valid only when no requested-output rows exist.
+Calculation actions and candidates-only inference omit this metadata.
+
+The five reason codes are:
+
+- `missing_value`: a numeric input needs a value.
+- `input_error`: a selected input may contain a quantity, value, unit or source error.
+- `unresolved_condition`: a physical model condition needs to be stated or resolved.
+- `model_constraint`: the chosen work addresses a model or parameter constraint.
+- `improving_evidence_support`: the chosen work aims to strengthen evidence or model support.
+
+The same proposal call supplies this metadata. Deterministic validation uses the
+table snapshot supplied in that call: the target row must exist, related fields
+must be canonical input or condition identifiers, and route/error references
+must belong to that row. The first three reasons require related fields. A
+newly suspected input error may have an empty `error_refs` array. Validation
+checks shape and references without judging the reason against readiness or
+requiring a calculation. An episode may choose investigation even when a
+calculation is ready. This metadata changes neither credit nor readiness.
+It is retained in the existing action request/response records and delegated
+proposal records, not added to the child's upward return contract.
 
 The root declares whether it needs source findings or recorded assumption
 hypotheses and names the calculation `parameter` served by that investigation.
@@ -338,8 +375,9 @@ verify this contract.
 
 An unfinished assumption reassessment preserves the last completed judgment,
 its credit, evidence basis and version. Its failure diagnostic identifies that
-retained version and the basis that was not reassessed; this distinction survives
-parent synthesis. Retention is not a new endorsement of added evidence or a
+retained version and the basis that was not reassessed; the structured review and
+operation records distinguish retained work from incomplete reassessment.
+Retention is not a new endorsement of added evidence or a
 revised rationale. A failed first assessment admits no evidence or judgment, but
 a validated candidate remains selectable as an explicitly `unassessed` hypothesis
 with `completed: false`, an empty rubric and zero support/learning credit. Its
@@ -360,10 +398,10 @@ Reading choices now state their execution semantics explicitly. `report` advance
 from the next unprocessed document span; a section title in its question cannot
 reposition that cursor. `lexical_probe` ranks source-local chunks for a targeted
 query. Each reading attempt records the source version, question, exact ranges,
-completion status and admitted fields. Synthesis receives aggregated examined,
-reviewed and unexamined ranges so its brief return can distinguish a failed
-review, unread material and a read that did not resolve the question. Those
-ranges are not appended to upward reports. The page's source-local availability
+completion status and admitted fields. Upward `reading_coverage` contains counts;
+`reviews` and `operations` distinguish incomplete review from completed work.
+Exact ranges remain in the underlying reading records and are not appended to
+upward reports. The page's source-local availability
 view retains coverage on later visits; it does not forbid rereading for a new question.
 Coverage is execution metadata, never evidence or positive scientific credit.
 
@@ -372,9 +410,9 @@ or rejected raw model text with its operation and parser diagnosis. A received
 JSON object is not necessarily admitted evidence. This audit makes discarded
 content inspectable, including a valid extraction followed by a failed review.
 Malformed JSON, incomplete output, duplicate keys, nonfinite numbers, and
-transport failures remain distinct. Parent diagnostics reference the call and
-explain the failure; raw rejected text is not promoted into scientific state or
-inserted into parent prompts. There is no silent JSON repair or hidden retry.
+transport failures remain distinct. Parent operation records retain the closed
+stage, category, status and count; raw rejected text is not promoted into
+scientific state or inserted into parent prompts. There is no silent JSON repair or hidden retry.
 Reports therefore contain model prompts and outputs and should be treated as
 local research artifacts when deciding what to share.
 
@@ -434,14 +472,31 @@ zero and does not change previous credit; repeated reviews or alternative
 wordings do not accumulate additional contributions for the same requirement.
 Genuine corrections can still decrease a contribution and reset the yield window.
 
-Output progress is the greater of current evidential support and a 1/8 floor
-for an actually computed requested quantity under current, noncontradicted
-premises. The floor is one rubric increment, not evidence confidence, and does
-not add to stronger support. Missing calculations, repeated calls, relabelled
-alternatives, stale claims and unsupported inapplicability earn no new floor.
-Transitive invalidations remain attached to derived inputs. An unchanged
-reassessment can improve support and merge compatible tool outputs without
-requiring another calculation; original versions remain in the audit.
+Requested outputs have a credit multiplier of 2. A current accepted output earns
+`2 * max(0.125, current_support)`: a 0.25-point floor or up to 2 points with full
+support. The floor comprises 0.05 points for completed method work and 0.20 for
+the current result. Support above the floor contributes the remaining points;
+it does not add another floor. When dependencies become stale, only the 0.05
+method credit remains until recalculation restores current-result credit.
+
+Intermediate calculations keep their existing rates: 0.125 points for a current
+accepted result, comprising 0.025 method credit and 0.100 current-result credit;
+only 0.025 remains when stale. Found-parameter credit is unchanged. The global
+score adds found-parameter and calculation-step points with weight 1 for each;
+there is no separate task-completion bonus. Evidence support retains its 0–1
+scale: the multiplier changes credit points, not evidence judgments.
+
+The full and compact parent decision views expose this policy using the same
+calculation projection that supplies global credit. Credit and the calculation
+table refresh after committed scientific changes, including for a suspended
+parent before its child returns. The episode still chooses whether and when to
+calculate; displaying the policy does not schedule an action.
+
+Missing calculations, repeated calls, relabelled alternatives, stale claims and
+unsupported inapplicability earn no new floor. Transitive invalidations remain
+attached to derived inputs. An unchanged reassessment can improve support and
+merge compatible tool outputs without requiring another calculation; original
+versions remain in the audit.
 
 The root's progress view and closing report distinguish recorded computations,
 current computations, evidential support and coherent parameterization coverage.
@@ -562,6 +617,39 @@ is labeled `calibration_consistency`. Even an out-of-calibration comparison is
 not claimed to be independent validation without a held-out protocol.
 
 ## Closure and Verification
+
+### Audit storage and active state
+
+Checkpointed runs write completed child audit records and ledger snapshots under
+the existing checkpoint's `archive/` directory. Archival happens after the parent
+has admitted the structured return and its unit hook has committed scientific
+changes. The parent keeps its typed reports; the shared scientific ledger and
+active episode ledgers remain available for decisions, credit and calculations.
+The completed child's source, duplicate ledger snapshot, recursive audit tree
+and descendant report history are then released from memory. Small completion
+metadata and disk references remain. No scientific score or decision rule is
+changed by archival.
+
+Completed model attempts use the same archive, with record-at-a-time iteration
+for acceptance checks and diagnostics. At root closure, the recursive audit is
+archived before final report construction. CLI trace, audit, report and standard
+output serialization stream saved blocks; checkpoint hashing also streams rather
+than constructing a complete JSON string. Final audit/report files still contain
+expanded JSON. Nested archive blocks have integrity-checked references, so
+archiving a parent does not copy its children's full histories again.
+
+For checkpointed Python callers, `EpisodeRecord.as_record()` can return an
+`ArchivedRecord`, and the report can contain an `ArchivedSequence`. Use
+`method_loop.archive.write_json` or `iter_json` to serialize these without
+materializing history. `ArchivedRecord.load()` is an explicit full-record read
+for inspection. Runs without a checkpoint retain the existing in-memory API.
+
+The memory changes have passed syntax/import checks and bounded serialization
+comparisons against saved v55 records. They have not yet demonstrated completion
+or measured peak memory in a new live run.
+The isolated v55 memory continuation preserves that run's original credit policy;
+the doubled requested-output credit described above applies to the working
+implementation.
 
 Lexical probes use locally implemented token BM25 with neighboring-context rank
 fusion, adapted from the reference reader under its MIT license. Ranking covers

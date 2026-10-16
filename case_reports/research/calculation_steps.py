@@ -20,6 +20,7 @@ from .progress import evidence_key
 COMPLETION_CREDIT = 0.125
 REUSABLE_METHOD_CREDIT = 0.025
 CURRENT_RESULT_CREDIT = COMPLETION_CREDIT - REUSABLE_METHOD_CREDIT
+REQUESTED_OUTPUT_MULTIPLIER = 2.0
 
 
 def _step_fields(scenario, outputs):
@@ -70,33 +71,42 @@ def _requirements(field, numeric, conditions, options, variables=()):
 
     def resolve(name, visiting):
         if name in numeric or name in conditions or name in variables:
-            return set(), set()
+            return set(), set(), []
         if name in visiting:
-            return {name}, set()
+            return {name}, set(), []
         routes = requirements.get(name, {}).get("routes", ())
         if not routes:
-            return ({name}, set()) if name in UNITS else (set(), {name})
+            return ({name}, set(), []) if name in UNITS else (set(), {name}, [])
         alternatives = [missing(route, {*visiting, name}) for route in routes]
-        return min(alternatives, key=lambda row: (len(row[0]) + len(row[1]), sorted(row[0]), sorted(row[1])))
+        def rank(row):
+            blocked_inputs = row[0] | {item["field"] for item in row[2]}
+            return len(blocked_inputs) + len(row[1]), sorted(blocked_inputs), sorted(row[1])
+        return min(alternatives, key=rank)
 
     def missing(route, visiting):
-        absent, absent_conditions = set(), set(route["conditions"]) - conditions
+        absent, absent_conditions, failures = set(), set(route["conditions"]) - conditions, []
         for name in route["inputs"]:
-            fields, needed = resolve(name, visiting)
+            fields, needed, constraints = resolve(name, visiting)
             absent.update(fields)
             absent_conditions.update(needed)
+            failures.extend(constraints)
         for constraint in route.get("parameter_constraints", ()):
             accepts = {"equal": operator.eq, "minimum": operator.ge}[constraint["operator"]]
-            if not any(accepts(value, constraint["value"]) for value in options.get(constraint["field"], ())):
+            values = options.get(constraint["field"], ())
+            if not values:
                 absent.add(constraint["field"])
-        return absent, absent_conditions
+            elif not any(accepts(value, constraint["value"]) for value in values):
+                failures.append({"field": constraint["field"], "operator": constraint["operator"],
+                    "required_value": constraint["value"], "actual_values": sorted(values)})
+        return absent, absent_conditions, list({identity(item): item for item in failures}.values())
 
     rows = []
     for route in requirements.get(field, {}).get("routes", ()):
-        absent, absent_conditions = missing(route, {field})
+        absent, absent_conditions, failures = missing(route, {field})
         rows.append({**route, "missing_inputs": sorted(absent),
                      "missing_conditions": sorted(absent_conditions),
-                     "ready": not absent and not absent_conditions})
+                     "constraint_failures": failures,
+                     "ready": not absent and not absent_conditions and not failures})
     return rows
 
 
@@ -318,6 +328,7 @@ def calculation_is_up_to_date(record, field, ledger, *, derived=False, invalid=N
 def _step_alternatives(records, field, subject, scenario, ledger, invalid, *, requested):
     """The common result projection used by the table and automatic binding."""
     alternatives = {}
+    multiplier = REQUESTED_OUTPUT_MULTIPLIER if requested else 1.0
     for record in records:
         if record.get("subject") != subject:
             continue
@@ -338,7 +349,8 @@ def _step_alternatives(records, field, subject, scenario, ledger, invalid, *, re
             current = accepted and fresh and admitted_calculation(record, ledger.assumptions, ledger=ledger,
                 **({"field": field} if derived else {"metric": field}))
             support = current_support(record, ledger.assumptions, metric=field, ledger=ledger) if current and requested else 0.0
-            points = max(COMPLETION_CREDIT, support) if current else REUSABLE_METHOD_CREDIT if accepted else 0.0
+            points = multiplier * (max(COMPLETION_CREDIT, support) if current
+                                   else REUSABLE_METHOD_CREDIT if accepted else 0.0)
             versions = record.get("calculation_versions", ())
             version = record.get("version") or (versions[-1] if versions else None)
             changes = _changed_dependencies(dependency, ledger) if not fresh else []
@@ -369,9 +381,9 @@ def _step_alternatives(records, field, subject, scenario, ledger, invalid, *, re
                 "computed_value": computed_value, "unit": value_row.get("unit", UNITS.get(field)),
                 "computed_limit": limit,
                 "review_status": review_status, "uncredited_reason": uncredited_reason,
-                "points": points, "method_credit": REUSABLE_METHOD_CREDIT if accepted else 0.0,
-                "current_result_credit": CURRENT_RESULT_CREDIT if current else 0.0,
-                "support_credit": max(0.0, support - COMPLETION_CREDIT) if current else 0.0,
+                "points": points, "method_credit": multiplier * REUSABLE_METHOD_CREDIT if accepted else 0.0,
+                "current_result_credit": multiplier * CURRENT_RESULT_CREDIT if current else 0.0,
+                "support_credit": multiplier * max(0.0, support - COMPLETION_CREDIT) if current else 0.0,
                 "input_fields": dependency.get("input_fields", sorted(record.get("input_values", record.get("parameters", {})))),
                 "condition_fields": dependency.get("condition_fields", sorted(record.get("conditions", {}))),
                 "changed_dependencies": changes,
@@ -470,5 +482,14 @@ def calculation_step_status(result, outputs, *, subjects=None):
         "points": round(sum(row["points"] for row in steps), 10),
         "credit_policy": {"reusable_completion": REUSABLE_METHOD_CREDIT,
             "current_result": CURRENT_RESULT_CREDIT,
-            "requested_output": "max(0.125, current support); support bonus is withdrawn when stale",
-            "meaning": "A stale formerly successful, accepted calculation retains reusable method work only. Enumeration, failed execution, and rejected or incomplete model review earn no credit. Alternative recipes are not a mandatory sequence."}}
+            "completion_floor": COMPLETION_CREDIT,
+            "requested_output_multiplier": REQUESTED_OUTPUT_MULTIPLIER,
+            "requested_output_rates": {
+                "reusable_completion": REQUESTED_OUTPUT_MULTIPLIER * REUSABLE_METHOD_CREDIT,
+                "current_result": REQUESTED_OUTPUT_MULTIPLIER * CURRENT_RESULT_CREDIT,
+                "completion_floor": REQUESTED_OUTPUT_MULTIPLIER * COMPLETION_CREDIT,
+                "fully_supported": REQUESTED_OUTPUT_MULTIPLIER},
+            "requested_output": (
+                f"{REQUESTED_OUTPUT_MULTIPLIER:g} * max({COMPLETION_CREDIT:g}, current support); "
+                "support bonus is withdrawn when stale"),
+            "meaning": "Base rates apply to intermediate steps. The requested-output multiplier applies to all endpoint credit components, including retained method credit when stale. A stale formerly successful, accepted calculation retains reusable method work only. Enumeration, failed execution, and rejected or incomplete model review earn no credit. Alternative recipes are not a mandatory sequence."}}

@@ -44,10 +44,16 @@ existing reasonableness assessment reviews that same record in place. Reuse a co
 its claim, evidence and target scope are unchanged. Assessment failure preserves
 the value and its discovery credit, and conditional arithmetic can still execute.
 
-A completed, accepted step earns a minimum 0.125, comprising 0.025 retained work
-and 0.100 current-result credit. Requested outputs can retain the existing stronger
-support score instead of the floor. A stale result loses current-result credit and
-the support bonus, retaining 0.025; recalculation restores the current contribution.
+A completed, accepted current intermediate earns 0.125, comprising 0.025 retained
+work and 0.100 current-result credit. Requested final outputs receive twice the
+base credit: `2 * max(0.125, current support)`, with a 0.25 floor and up to 2 points
+with full support. Their method/current/support credit components use the same
+multiplier. A stale result loses current-result credit and the support bonus,
+retaining 0.05 for a requested output or 0.025 for an intermediate; recalculation
+restores the current contribution. Expose the scoring projection's numerical
+`credit_policy` in the existing episode decision input, including compact child
+views. Found-value credit is unchanged, and there is no separate task-completion
+bonus. The episode continues to choose calculation or investigation.
 Unchanged-claim evidence reviews do not require repeated arithmetic. All active
 ancestor scores update after a committed change, without adding synthetic yield
 observations. These scores do not establish scientific completion.
@@ -74,7 +80,7 @@ provider. The current live run uses the Codex CLI ChatGPT login; the local
 Argo shim remains an option. It extracts structured quantities from retrieved text, validates exact
 source spans and source references, calibrates infectiousness/Cq from searched
 outbreak evidence, and evaluates the requested safety quantities with deterministic
-Bazant-Bush calculation tools. Child credit and condensed findings inform their
+Bazant-Bush calculation tools. Child credit and structured return records inform their
 parents' continued decisions.
 
 Return only these three scientific quantities, with their conditions, evidence,
@@ -213,15 +219,33 @@ or published-number target metric.
   Inferred hypotheses receive mandatory reasonableness assessment; that review
   qualifies their support and does not gate source-value discovery credit.
   Search and document examination remain iterative episodes.
-- Parents specify the information contract needed from each child. Children
-  synthesize condensed findings, cumulative support, unresolved uncertainty,
-  contradictions, and their implications for the parent's goal. Include actual
-  search/reading coverage and distinguish unexamined material from examined but
-  uninformative material.
-- On failure, communicate what failed, why, and what useful information remains.
-  Preserve relevant partial findings without admitting unvalidated content as
-  established evidence. The purpose is to improve the parent's future decisions,
-  not merely to instruct a retry.
+- When a scientific episode chooses `investigate` or `evidence_strategy`, its
+  existing action JSON includes `calculation_deferrals` identifying the affected
+  requested-output rows by `subject` and `field`. Each record also contains a
+  defined `reason`, `related_fields`, a row-scoped `route_ref` or null, and
+  `error_refs`. The reasons are `missing_value`, `input_error`,
+  `unresolved_condition`, `model_constraint`, and `improving_evidence_support`.
+  An input-error suspicion can name its field before an error footnote exists.
+  Validate identifiers against the displayed decision snapshot; do not reject
+  an investigation because calculation is ready or adjudicate its priority.
+  Require at least one affected row when requested rows exist, otherwise `[]`.
+  Calculation actions and candidates-only inference omit this metadata. It is
+  retained in existing action records and does not change credit or readiness,
+  add a judge call, or add fields to the child-to-parent return contract.
+- Parents specify the information contract needed from each child. Returns are
+  formal JSON with declared terms and definitions: `parameter_results` contains
+  numbers, units, origin, status and declared references; `reviews` contains
+  verdict, completion and criterion grades; `calculations` contains output
+  statuses, values and units; `reading_coverage` contains counts; `operations`
+  contains closed stage/category/status terms and counts; `completion` contains
+  `ended_by` and `evaluated`. Existing work-call JSON and runtime records supply
+  these fields. There is no separate summary call, findings paragraph, direct
+  child prose message or free-form completion reason.
+- On failure, return the recorded operation category and status alongside valid
+  partial parameter, review and calculation records. Reading counts distinguish
+  unexamined material from examined material. Unvalidated content does not become
+  established evidence. The parent uses these structured outcomes for its next
+  decision; an operational stop does not establish scientific completion.
 - Roll sibling contributions up to parents without double-counting repeated
   findings or calculations. Credit reflects goal-relevant partial progress,
   usable provisional outputs, and stronger scientific support. Do not reward

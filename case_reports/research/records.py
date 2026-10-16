@@ -68,15 +68,105 @@ def cited_assessment_evidence(assessment):
                   for key in criterion["evidence"]}
     references.update(assessment["review"].get("supporting_evidence", ()))
     references.update(assessment["review"].get("contradicting_evidence", ()))
-    references.update(assessment["review"].get("invalid_evidence", ()))
+    references.update(row["evidence_ref"] if isinstance(row, dict) else row
+                      for row in assessment["review"].get("invalid_evidence", ()))
     constraint = assessment["review"].get("request_constraint")
     if constraint is not None:
         references.update(constraint["evidence"])
     return {key: item for key, item in assessment["evidence"].items() if key in references}
 
 
-def target_value_model_view(row):
-    """Expose value-specific relevance while retaining audit indexes in the ledger."""
+def target_value_model_view(row, *, decision_view=False, target_subjects=()):
+    """Project typed decision data; scientific reviewers retain their full records."""
+    if decision_view:
+        from ...task_executors.scenario_metrics.catalog import METRICS
+        from ...task_executors.scenario_metrics.evaluate import UNITS, CONDITIONS
+
+        targets = set(target_subjects)
+        units = {**{name: metric.unit for name, metric in METRICS.items()}, **UNITS}
+        fields = set(units) | set(CONDITIONS)
+
+        def number(value):
+            return value if type(value) in (int, float) and math.isfinite(value) else None
+
+        def enum(value, choices):
+            return value if isinstance(value, str) and value in choices else None
+
+        def subject(value):
+            if not isinstance(value, str) or not value:
+                return None
+            return value if value in targets else "source_subject:" + identity(value)[:12]
+
+        def score(value):
+            value = number(value)
+            return value if value is not None and 0 <= value <= 1 else None
+
+        view = {}
+        for key in ("field", "parameter"):
+            value = enum(row.get(key), fields)
+            if value is not None:
+                view[key] = value
+        field = view.get("field", view.get("parameter"))
+        for key in ("value", "points", "discovery_points", "learning_bonus", "reasonableness"):
+            if key in row:
+                view[key] = number(row[key])
+        if "unit" in row:
+            expected = units.get(field)
+            view["unit"] = (row["unit"] if isinstance(row["unit"], str)
+                            and row["unit"] in set(units.values())
+                            and (expected is None or row["unit"] == expected) else None)
+        for key in ("found", "reviewed", "source_candidate_unavailable"):
+            if key in row:
+                view[key] = row[key] if type(row[key]) is bool else None
+        for key in ("subject", "origin_subject"):
+            if key in row:
+                view[key] = subject(row[key])
+        if "subjects" in row:
+            subjects = row["subjects"] if isinstance(row["subjects"], (list, tuple)) else ()
+            view["subjects"] = [subject(value) for value in subjects
+                                if isinstance(value, str) and value]
+        group = row.get("group_id", row.get("scope_group_id"))
+        if isinstance(group, str) and group:
+            view["group_ref"] = "target_group:" + identity(group)[:12]
+        if "status" in row:
+            view["status"] = enum(row["status"], {
+                "missing", "reviewed_usable", "recorded_unassessed", "recorded_unsupported", "contradicted"})
+        if "review_verdict" in row:
+            view["review_verdict"] = enum(row["review_verdict"], {
+                "unassessed", "supported", "provisional", "unsupported", "contradicted", "fixed_condition"})
+        if "input_status" in row:
+            view["input_status"] = enum(row["input_status"], {"found", "missing", "error", "corrected"})
+        if "error_refs" in row:
+            view["error_refs"] = [ref for ref in row["error_refs"] if isinstance(ref, str)
+                and ref.startswith("error:") and len(ref) == 18
+                and all(character in "0123456789abcdef" for character in ref[6:])]
+        applicability = row.get("source_applicability")
+        if isinstance(applicability, Mapping):
+            relationships = []
+            for relation in applicability.get("relationships", ()):
+                if not isinstance(relation, Mapping):
+                    continue
+                locator = relation.get("source")
+                compact = {
+                    "source_ref": "source:" + identity(locator)[:12]
+                        if isinstance(locator, str) and locator else None,
+                    "source_subject": subject(relation.get("source_subject")),
+                    "target_subject": subject(relation.get("target_subject")),
+                    "parameter": enum(relation.get("parameter"), fields),
+                    "score": score(relation.get("score")),
+                }
+                for key in ("known", "considered"):
+                    if key in relation:
+                        value = relation[key]
+                        compact[key] = value if type(value) is int and value >= 0 else None
+                relationships.append(compact)
+            view["source_applicability"] = {
+                "status": enum(applicability.get("status"), {"assessed", "unknown"}),
+                "score": score(applicability.get("score")), "relationships": relationships}
+        elif "source_applicability" in row:
+            view["source_applicability"] = None
+        return view
+
     applicability = row.get("source_applicability")
     if not isinstance(applicability, dict):
         return row

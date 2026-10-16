@@ -93,7 +93,10 @@ def source_calculation_inputs(action, ledger):
     return facts
 
 
-def review_model(agent, action, facts, context):
+def review_model(agent, action, facts, context, *, correction_evidence=None):
+    from .assumptions import INPUT_ERROR_CODES, input_error_schema
+
+    correction_evidence = correction_evidence or {}
     basis = action.get("basis")
     if not isinstance(basis, str) or not basis.strip():
         raise ValueError("Every parameterization requires a named rationale")
@@ -105,6 +108,8 @@ def review_model(agent, action, facts, context):
         "facts": [f.semantic_record() for f in facts], "context": context,
         "resolved_numeric_inputs": bindings,
         "selected_condition_statements": action.get("conditions", {}),
+        "input_source_records": correction_evidence,
+        "input_error_definitions": INPUT_ERROR_CODES,
         "instruction": (
             "resolved_numeric_inputs gives the actual calculation inputs and their canonical fields, "
             "values, units and subjects. Target inputs are supplied automatically from the current main table. "
@@ -128,11 +133,20 @@ def review_model(agent, action, facts, context):
             "For a distance model using negligible_near_field, assess that physical hypothesis separately "
             "from well-mixed background or mask filtration. Mask penetration alone does not establish "
             "negligible local enhancement throughout the occupied region. Computational convenience "
-            "or a desire to fill the missing distance output is not scientific support."
+            "or a desire to fill the missing distance output is not scientific support. "
+            "If an input_source_records entry misrecords the source quantity, number, unit, or "
+            "attribution, identify its exact reference and error code in invalid_evidence. "
+            "Assigning a source number to a different physical quantity is a quantity_mismatch "
+            "even when the number and unit were transcribed correctly. Weak support, a different "
+            "population or setting, and uncertainty in a transfer are not recording errors. "
+            "Do not reject a correct source record merely because its use here is unsupported. "
+            "A demonstrated recording error updates the input table and returns control before "
+            "this calculation executes; a negative support judgment alone does not prevent arithmetic."
         ),
         "response_contract": {"type": "object", "additionalProperties": False,
-            "required": ["admit", "reason"], "properties": {
+            "required": ["admit", "reason", "invalid_evidence"], "properties": {
                 "admit": {"type": "boolean"}, "reason": {"type": "string", "minLength": 1},
+                "invalid_evidence": input_error_schema(correction_evidence),
                 "limitations": {"type": "array", "items": {"type": "string"}}}},
     })
     if type(review.get("admit")) is not bool or not isinstance(review.get("reason"), str) or not review["reason"].strip():

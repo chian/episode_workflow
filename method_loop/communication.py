@@ -11,6 +11,10 @@ from typing import Any, Mapping
 from .binding import _freeze_json, _text, _thaw_json
 
 
+class ParentModelInputError(ValueError):
+    """The binding assembled invalid parent inputs before model dispatch."""
+
+
 @dataclass(frozen=True)
 class ReportContract:
     """Information requested before one child starts, in the parent's terms.
@@ -93,7 +97,10 @@ class ParentReport:
 
     def validate_model_inputs(self, inputs: Mapping[str, Any]) -> None:
         """Apply the same identity boundary to the final declared model inputs."""
-        self.exclude_audit_identifiers(self._audit_identifiers, inputs=inputs)
+        try:
+            self.exclude_audit_identifiers(self._audit_identifiers, inputs=inputs)
+        except ValueError as exc:
+            raise ParentModelInputError(str(exc)) from exc
 
     def as_record(self) -> dict[str, Any]:
         return _thaw_json(self.values)

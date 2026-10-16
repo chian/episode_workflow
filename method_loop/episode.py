@@ -26,7 +26,8 @@ import inspect
 import json
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import math
 from types import MappingProxyType
 from typing import (
     Any,
@@ -42,6 +43,7 @@ from typing import (
 from .identities import EpisodeRef, UnitRef
 from .runtime import ControllerFactory, ControllerRuntime, Path, Scope
 from .communication import ParentReport, ReportContract
+from .archive import ArchivedRecord
 
 __all__ = [
     "END_EXHAUSTED",
@@ -172,7 +174,29 @@ def _require_closed_record(value: Any, name: str) -> ClosedRecord:
     record = value.as_record()
     if not isinstance(record, Mapping):
         raise TypeError(f"{name}.as_record() must return a mapping")
-    _freeze_json(record)
+    # Validation must not construct and discard several copies of a full
+    # inherited ledger. The surface has already admitted the closed record.
+    active = set()
+    def validate(item):
+        if item is None or isinstance(item, (str, bool, int)):
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise TypeError("Closed record values must be finite JSON values")
+            return
+        if isinstance(item, (Mapping, tuple, list)):
+            identity = id(item)
+            if identity in active:
+                raise TypeError("Closed record values cannot contain circular references")
+            active.add(identity)
+            try:
+                for child in item.values() if isinstance(item, Mapping) else item:
+                    validate(child)
+            finally:
+                active.remove(identity)
+            return
+        raise TypeError(f"{type(item).__name__} is not a JSON-compatible closed record value")
+    validate(record)
     return value
 
 
@@ -557,7 +581,7 @@ class UnitRecord:
     unit_ref: UnitRef
     episode_update: Optional[EpisodeUpdate] = None
     child: Optional["EpisodeRecord"] = None
-    child_result: Optional[ClosedRecord] = None
+    child_result: Optional[ClosedRecord | ArchivedRecord] = None
     goal_result: Any = None
 
     @property
@@ -626,6 +650,7 @@ class EpisodeRecord:
     path: Path = ()
     end_reason: str = ""
     episode_ref: Optional[EpisodeRef] = None
+    archived_record: Optional[ArchivedRecord] = field(default=None, repr=False, compare=False)
 
     @property
     def goal(self) -> EpisodeGoal:
@@ -639,7 +664,16 @@ class EpisodeRecord:
     def run_id(self) -> str:
         return self.episode_ref.run_id if self.episode_ref is not None else ""
 
-    def as_record(self) -> dict[str, Any]:
+    def archived(self, archive):
+        """Retain completion metadata while moving the recursive audit to disk."""
+        if self.archived_record is not None:
+            return self
+        stored = archive(self)
+        return replace(self, unit_records=(), archived_record=stored)
+
+    def as_record(self) -> dict[str, Any] | ArchivedRecord:
+        if self.archived_record is not None:
+            return self.archived_record
         return {
             "scope_level": self.scope_level,
             "scope_key": self.scope_key,
@@ -1061,6 +1095,7 @@ class Episode:
     on_unit: Optional[Callable[[Any, Contribution, UnitView], Any]] = None
     on_close: Optional[Callable[[EpisodeRecord], Any]] = None
     resume_units: tuple[ResumeUnit, ...] = ()
+    archive_record: Optional[Callable[[Any], ArchivedRecord]] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.grain, Grain):
@@ -1078,6 +1113,8 @@ class Episode:
             raise TypeError("Episode.build_result must be callable")
         if self.on_close is not None and not callable(self.on_close):
             raise TypeError("Episode.on_close must be callable")
+        if self.archive_record is not None and not callable(self.archive_record):
+            raise TypeError("Episode.archive_record must be callable")
         if not isinstance(self.request, EpisodeRequest):
             raise TypeError("Episode.request must be an EpisodeRequest")
         if not isinstance(self.resume_units, tuple) or any(
@@ -1380,6 +1417,10 @@ class Episode:
             )
             if self.on_unit is not None:
                 self.on_unit(item, contribution, unit_view)
+            self._archive_completed_child(ctx, records)
+            # The acquired value and invocation edge retain the full child
+            # result/source until these loop locals are released.
+            del acquired, item, _
             step = unit_view.controller_step
             if step.stop:
                 scope, end = self._stop_end(ctx, scope, records, step)
@@ -1408,6 +1449,7 @@ class Episode:
                 ended_by, end_reason = item.kind, item.kind
                 break
             step = await self._acquire_unit_async(ctx, scope, records, item)
+            del item
             if step.stop:
                 scope, end = await self._stop_end_async(
                     ctx, scope, records, step
@@ -1432,7 +1474,20 @@ class Episode:
             result = self.on_unit(item, contribution, unit_view)
             if inspect.isawaitable(result):
                 await result
+        self._archive_completed_child(ctx, records)
         return unit_view.controller_step
+
+    def _archive_completed_child(self, ctx, records):
+        """Release child history only after the parent commit hook succeeds."""
+        record = records[-1]
+        if self.archive_record is None or record.child is None:
+            return
+        child = record.child.archived(self.archive_record)
+        result = self.archive_record(record.child_result)
+        records[-1] = replace(record, child=child, child_result=result)
+        # The active parent retains its own admitted typed report. Reports for
+        # the completed child's descendants are now preserved in its archive.
+        ctx._child_updates.pop(record.child.path, None)
 
 
 @dataclass(frozen=True)

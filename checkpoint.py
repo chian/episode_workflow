@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from collections.abc import Mapping
 
 from .method_loop import Episode
+from .method_loop.archive import ArchivedRecord, ArchivedSequence, JsonArchive, iter_json, write_json
 from .method_loop.identities import EpisodeRef
 from .task_executors._http import ProviderError
 
@@ -33,6 +34,8 @@ class CheckpointError(RuntimeError):
 
 
 def _record(value):
+    if isinstance(value, (ArchivedRecord, ArchivedSequence)):
+        return value
     if hasattr(value, "as_record"):
         return _record(value.as_record())
     if is_dataclass(value):
@@ -52,7 +55,10 @@ def _json(value, *, canonical=False):
 
 
 def _digest(value):
-    return hashlib.sha256(_json(value, canonical=True).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256()
+    for chunk in iter_json(value, canonical=True, normalize_nonfinite=False):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def implementation_identity():
@@ -79,7 +85,7 @@ def _atomic(path, value):
     try:
         fd, temporary = tempfile.mkstemp(prefix=".write-", dir=path.parent)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(_json(value))
+            write_json(stream, value, normalize_nonfinite=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -158,6 +164,7 @@ class CheckpointJournal:
                     "provider_configuration": None, "logical_run_id": "run_" + uuid.uuid4().hex}
                 _atomic(self.path / "manifest.json", self.manifest)
             self.replay_count = len(self.records)
+            self.archive = JsonArchive(self.path / "archive")
             self._begin_attempt(resume)
             if resume or fork is not None:
                 self._reconstruction_cursor()
@@ -464,8 +471,14 @@ class CheckpointJournal:
     def _append(self, kind, operation, request, *, frame=None, **result):
         self._historical_effects = False
         frame = frame or self._frame(kind, operation, request)
+        if frame.frame_type == "trace_event":
+            request_sha256 = frame.body["sha256"]
+        elif frame.frame_type in {"model_request", "http_request"}:
+            request_sha256 = frame.body["request"]["sha256"]
+        else:
+            request_sha256 = _digest(request)
         body = {"index": len(self.records), "previous": self.records[-1]["sha256"] if self.records else "",
-                "kind": kind, "operation": operation, "request_sha256": _digest(request),
+                "kind": kind, "operation": operation, "request_sha256": request_sha256,
                 "frame_type": frame.frame_type, "body": frame.body, **result}
         record = {**body, "sha256": _digest(body)}
         _atomic(self.path / "records" / f"{len(self.records):012d}.json", record)
@@ -478,7 +491,8 @@ class CheckpointJournal:
         self._inflight = True
         frame = self._frame("call", operation, request)
         self.pending = {"index": len(self.records), "kind": "call", "operation": operation,
-                        "request_sha256": _digest(request), "frame_type": frame.frame_type, "body": frame.body}
+                        "request_sha256": frame.body["request"]["sha256"],
+                        "frame_type": frame.frame_type, "body": frame.body}
         _atomic(self.path / "pending.json", self.pending)
 
     def _finish(self, operation, request, value=None, error=None):
@@ -541,9 +555,10 @@ class CheckpointJournal:
 
     def event(self, value, sink=None):
         operation = value.get("event", "event")
-        if self._match("event", operation, value) is not None:
+        frame = self._frame("event", operation, value)
+        if self._match_frame(frame) is not None:
             return
-        self._append("event", operation, value)
+        self._append("event", operation, value, frame=frame)
         if sink is not None:
             sink(value)
 
@@ -578,8 +593,8 @@ class CheckpointJournal:
                 return prior_build_result(record)
 
         return _InstrumentedEpisode(**{field.name: getattr(episode, field.name) for field in fields(Episode)
-                                      if field.name not in {"on_unit", "build_result"}},
-            on_unit=on_unit, build_result=build_result, checkpoint=self,
+                                      if field.name not in {"on_unit", "build_result", "archive_record"}},
+            on_unit=on_unit, build_result=build_result, archive_record=self.archive.store, checkpoint=self,
             runtime_boundary=lambda: {"goal_state_id": _digest(_record(state())),
                 "initial_goal_state_id": initial, "goal_view": episode.goal.as_record()})
 
@@ -635,6 +650,9 @@ class _InstrumentedEpisode(Episode):
                 "ended_by": record.ended_by, "end_reason": record.end_reason,
                 "units_consumed": record.units_consumed,
                 "controller_state": _record(record.controller_state)})
+            if len(ref.path) == 1:
+                record = record.archived(self.checkpoint.archive.store)
+                ctx._child_updates.pop(record.path, None)
             return record
 
     async def run_async(self, ctx):

@@ -58,10 +58,11 @@ def _distinct_sources(records):
 
 def parameter_support(result, requirements, *, hypotheses_only=False, subjects=()):
     """Count filled elements, retaining alternatives rather than selecting a value."""
+    from .target_values import invalidated_source_records
+
     values = {field: {} for field in requirements}
     learning = {field: {} for field in requirements}
-    invalid = {evidence_key(record) for assessment in result.assumptions
-               for record in assessment.get("invalidated_evidence", ())}
+    invalid = {evidence_key(record) for record in invalidated_source_records(result)}
 
     def add(field, subject, value, unit, records, *, relation="supports", reviewed=False):
         if field not in values:
@@ -121,11 +122,10 @@ def found_parameter_progress(result, *, ledger=None):
     """
     from .records import Ledger
     from .scenario_sharing import independent_groups
-    from .target_values import target_value_preference
+    from .target_values import invalidated_source_records, target_value_preference
 
     ledger = ledger if ledger is not None else Ledger(result)
-    invalid = {evidence_key(record) for assessment in ledger.assumptions.values()
-               for record in assessment.get("invalidated_evidence", ())}
+    invalid = {evidence_key(record) for record in invalidated_source_records(ledger)}
     rows = []
     for group in independent_groups(ledger):
         field = group["parameter"]

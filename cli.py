@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import filecmp
 import json
 import math
 import os
@@ -21,6 +22,7 @@ from .configured_providers import (
 )
 from .checkpoint import CheckpointError, CheckpointJournal
 from .method_loop.reconstruction import ReconstructionError
+from .method_loop.archive import iter_json, write_json
 
 
 def main(
@@ -88,7 +90,7 @@ def main(
             for path in output_paths:
                 if (path in {checkpoint.path / name for name in ("manifest.json", "pending.json", "lock")}
                         or any(directory in path.parents for directory in
-                               (checkpoint.path / "records", checkpoint.path / "attempts"))):
+                               (checkpoint.path / "records", checkpoint.path / "attempts", checkpoint.path / "archive"))):
                     raise CheckpointError("Output path overlaps checkpoint continuation records")
                 if not path.parent.is_dir():
                     raise CheckpointError(f"Output directory does not exist: {path.parent}")
@@ -98,7 +100,9 @@ def main(
             trace_stream = streams.enter_context(trace_path.open("a" if args.resume else "x"))
 
             def trace_event(event):
-                print(json.dumps(_json_record(event), allow_nan=False), file=trace_stream, flush=True)
+                write_json(trace_stream, event)
+                trace_stream.write("\n")
+                trace_stream.flush()
 
             record, report = run_configured_safety_guideline_request(
                 disease=args.disease, research_request=request, scenario=args.scenario,
@@ -107,15 +111,17 @@ def main(
                 progress=args.progress, trace_event=trace_event if trace_stream is not None else None,
                 metrics=args.metric, limits=limits, checkpoint=checkpoint,
             )
-            report_record = {**_json_record(report.as_record()), "checkpoint": checkpoint.provenance()}
-            checkpoint.event({"event": "workflow_completed", "audit": _json_record(record.as_record()),
+            report_record = checkpoint.archive.store({
+                **report.as_record(), "checkpoint": checkpoint.provenance()})
+            checkpoint.event({"event": "workflow_completed", "audit": record.as_record(),
                               "report": report_record})
             checkpoint.complete()
-            _write_result(audit_path, json.dumps(_json_record(record.as_record()), indent=2, allow_nan=False) + "\n", resume=bool(args.resume))
+            _write_result(audit_path, iter_json(record.as_record(), indent=2), resume=bool(args.resume))
             content = (_markdown(report) + "\nCheckpoint: " + str(checkpoint.path) + "\n" +
                        "```json\n" + json.dumps(checkpoint.provenance(), indent=2) + "\n```"
-                       if args.format == "markdown" else json.dumps(report_record, indent=args.indent, allow_nan=False))
-            _write_result(report_path, content + "\n", resume=bool(args.resume))
+                       if args.format == "markdown" else None)
+            _write_result(report_path, (content,) if content is not None else
+                          iter_json(report_record, indent=args.indent), resume=bool(args.resume))
     except (ProviderConfigurationError, CheckpointError, ReconstructionError, ValueError, OSError) as exc:
         checkpoint_failure = isinstance(exc, (CheckpointError, ReconstructionError))
         print(
@@ -141,27 +147,23 @@ def main(
     if args.format == "markdown":
         print(content, file=out)
         return 0 if report.passed else 1
-    print(
-        json.dumps(
-            report_record,
-            indent=args.indent,
-            sort_keys=True,
-            allow_nan=False,
-        ),
-        file=out,
-    )
+    write_json(out, report_record, canonical=True, indent=args.indent)
+    out.write("\n")
     return 0 if report.passed else 1
 
 
-def _write_result(path, content, *, resume):
-    if resume and path.exists() and path.read_text() == content:
-        return
+def _write_result(path, chunks, *, resume):
+    """Publish streamed output atomically without loading an existing report."""
     fd, temporary = tempfile.mkstemp(prefix=".result-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
-            stream.write(content)
+            for chunk in chunks:
+                stream.write(chunk)
+            stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        if resume and path.exists() and filecmp.cmp(temporary, path, shallow=False):
+            return
         # Atomic publication without overwriting another result or a prior run.
         os.link(temporary, path)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)

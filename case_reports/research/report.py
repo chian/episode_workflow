@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from collections import Counter
 
 from ...method_loop import ClosedRecord
-from ...task_executors.scenario_metrics.catalog import METRICS, PAPER, metric_catalog_record
-from ...task_executors.scenario_metrics.evaluate import output_has_exclusion, output_meets_contract, exposure_outputs_agree
+from ...task_executors.scenario_metrics.catalog import METRICS, PAPER, metric_catalog_record, metric_routes
+from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, output_has_exclusion, output_meets_contract, exposure_outputs_agree
 from ...task_executors.scenario_metrics.dependencies import input_requirements
-from .records import cited_assessment_evidence, current_support, assumption_matches, Ledger
-from .communication import reading_coverage
+from .records import cited_assessment_evidence, current_support, assumption_matches, identity, Ledger
+from .communication import decision_records, reading_coverage
 from .verification import calibration_progress, live_acceptance, target_calibration_progress
 from .calculation_steps import calculation_is_up_to_date, calculation_step_status
 
@@ -103,20 +103,36 @@ def scientific_progress(result, metrics, *, decision_view=False):
     assessments = {a["key"]: a for a in result.assumptions}
     ledger = Ledger(result)
     if decision_view:
+        records = decision_records(ledger, target_subjects=scenarios)
+        subject_refs = records["subjects"]
+        parameterizations = {estimate["label"]: "parameterization:" + identity(estimate["label"])[:12]
+                             for estimate in result.estimates}
+        parameterizations.update(records["parameterizations"])
+        assumption_rows = {key: records["assumptions"].get(f"assumption:{index}")
+                           for index, key in enumerate(ledger.assumptions, 1)}
+        declared_fields = set(UNITS) | set(CONDITIONS) | set(METRICS)
         # Describe calculated source values without exposing a target-input selector.
-        outputs = {fact.key: {name: getattr(fact, name)
-                   for name in ("subject", "field", "value", "unit")}
-                   for fact in ledger.facts.values()}
+        outputs = {fact.key: {"subject": subject_refs[fact.subject], "field": fact.field,
+                            "value": fact.value, "unit": fact.unit}
+                   for fact in ledger.facts.values() if fact.field in UNITS}
 
         def referenced(keys):
             return [outputs.get(key, {"available": False}) for key in keys]
 
-        calibration = {**calibration, "calibrations": [
-            {**{key: value for key, value in row.items() if key != "output_fact_keys"},
-             "outputs": referenced(row.get("output_fact_keys", ()))}
-            for row in calibration["calibrations"]]}
+        calibration = {**calibration,
+            "observed_event_fields": {subject_refs[subject]: fields
+                                      for subject, fields in calibration["observed_event_fields"].items()},
+            "calibrations": [{
+                **{key: row[key] for key in ("subtask", "operator", "observed_fields", "outbreak_evidence_acquired",
+                                           "duration_observation_available", "current", "support")},
+                "subject": subject_refs[row["subject"]],
+                "source_count": len(row["source_refs"]),
+                "outbreak_observations_missing": bool(row["missing_observations"]),
+                "outputs": referenced(row.get("output_fact_keys", ())),
+            } for row in calibration["calibrations"]]}
         calibration_targets = {subject: {**target, "alternatives": [
-            {**alternative, "calibrated_inputs_by_quantity": {
+            {**alternative, "parameterization": parameterizations[alternative["parameterization"]],
+             "calibrated_inputs_by_quantity": {
                 name: referenced(keys) for name, keys in
                 alternative["calibrated_inputs_by_quantity"].items()}}
             for alternative in target["alternatives"]]}
@@ -142,13 +158,30 @@ def scientific_progress(result, metrics, *, decision_view=False):
                     for key in dependency.get("assumption_versions", {}):
                         current = assessments.get(key)
                         if not assumption_matches(dependency, key, current) or current.get("review", {}).get("verdict") == "contradicted":
-                            changed.append({"assumption_key": key, "field": (current or previous.get(key, {})).get("field"),
-                                "previous_statement": previous.get(key, {}).get("statement"),
-                                "current_statement": current.get("statement") if current else None,
-                                "current_verdict": current.get("review", {}).get("verdict") if current else "unavailable"})
-                    recalculation.append({"parameterization": alternative["label"], "quantity": metric,
+                            if decision_view:
+                                before = previous.get(key, {})
+                                typed = assumption_rows.get(key)
+                                changed.append({"field": (current or before).get("field"),
+                                    "previous_value": before.get("value") if type(before.get("value")) in (int, float) else None,
+                                    "current_value": typed.get("value") if typed else None,
+                                    "current_review": typed["review"] if typed else None,
+                                    "condition_changed": bool((current or before).get("field") in CONDITIONS and
+                                        before.get("statement") != (current or {}).get("statement")),
+                                    "current_condition_ref": typed.get("condition_ref") if typed else None})
+                            else:
+                                changed.append({"assumption_key": key, "field": (current or previous.get(key, {})).get("field"),
+                                    "previous_statement": previous.get(key, {}).get("statement"),
+                                    "current_statement": current.get("statement") if current else None,
+                                    "current_verdict": current.get("review", {}).get("verdict") if current else "unavailable"})
+                    recalculation.append({"parameterization": (parameterizations[alternative["label"]]
+                                                               if decision_view else alternative["label"]), "quantity": metric,
                         "output_contract_met": contract_met,
-                        "changed_premises": changed, "invalidated_dependencies": dependency.get("invalidated_dependencies", []),
+                        "changed_premises": changed,
+                        "invalidated_dependencies": ([field for field in dependency.get("invalidated_dependencies", ())
+                                                      if isinstance(field, str) and field in declared_fields]
+                                                     if decision_view else dependency.get("invalidated_dependencies", [])),
+                        **({"invalidated_dependency_count": len(dependency.get("invalidated_dependencies", ()))}
+                           if decision_view else {}),
                         "meaning": ("Recorded arithmetic does not meet the requested operation or fixed-input contract; "
                                     "more supporting evidence alone cannot supply the missing evaluation." if not contract_met else
                                     "Historical arithmetic is retained, but its premises are no longer current. "
@@ -156,22 +189,44 @@ def scientific_progress(result, metrics, *, decision_view=False):
                 for key in dependency.get("assumption_versions", {}):
                     assumption = assessments.get(key)
                     if assumption and assumption["reasonableness"] < 1:
-                        need = needs.setdefault(key, {k: assumption[k] for k in
-                            ("subject", "field", "value", "statement", "reasonableness")})
-                        need["reason"] = assumption["review"]["explanation"]
+                        if decision_view:
+                            need = needs.setdefault(key, dict(assumption_rows[key]))
+                        else:
+                            need = needs.setdefault(key, {k: assumption[k] for k in
+                                ("subject", "field", "value", "statement", "reasonableness")})
+                            need["reason"] = assumption["review"]["explanation"]
                         affected = need.setdefault("affected_quantities", [])
                         if metric not in affected:
                             affected.append(metric)
+        coverage = scenario["coverage"]
+        if decision_view:
+            coverage = {name: {
+                **{key: row[key] for key in ("computed", "recorded_computation", "calculation_status", "status", "output_contract")},
+                "figures": [{
+                    "parameterization": parameterizations[figure["parameterization"]],
+                    **{key: figure[key] for key in ("value", "support", "risk_threshold", "fixed_inputs") if key in figure},
+                    "unit": METRICS[name].unit,
+                    **{key: figure[key] for key, choices in {
+                        "limit": {"finite", "unbounded", "empty", "function"},
+                        "regime": {route.regime for route in metric_routes(name)},
+                        "operation": {"solve_time", "solve_distance", "evaluate_R_in"},
+                        "background": {"steady", "transient"}, "near_field": {"jet", "uniform"},
+                    }.items() if figure.get(key) in choices},
+                    "function_output": "function" in figure,
+                } for figure in row["figures"]],
+                "missing": [field for field in row["missing"] if field in declared_fields],
+                "applicability_recorded": bool(row["applicability"]),
+            } for name, row in coverage.items()}
         targets[subject] = {
             "calibration_linkage": calibration_targets[subject],
             "input_requirements": input_requirements(metrics,
                 {fact.field for fact in main_inputs},
                 {a["field"] for a in scoped if a["value"] is None},
                 scenario["definition"].get("calculation_variables", ())),
-            "coverage": scenario["coverage"],
+            "coverage": coverage,
             "provisional_parameterization_available": scenario["provisional_parameterization_available"],
             "complete_parameterization_available": scenario["complete_parameterization_available"],
-            "parameterizations": [{"name": e["label"],
+            "parameterizations": [{"name": parameterizations[e["label"]] if decision_view else e["label"],
                 "computed_quantities": [m for m in metrics if m in e["current_computed_metrics"]],
                 "unresolved_quantities": [m for m in metrics if m not in e["current_computed_metrics"]]}
                 for e in scenario["alternatives"]],
@@ -247,7 +302,7 @@ class ResearchReport(ClosedRecord):
                 "support_status": "current" if current_support(c, assessments, ledger=run.global_goal.ledger) > 0 else "stale_or_unsupported"}
                 for c in result.calculations if c["tool"] == "compare_predictions_with_observations"],
             "research_request": run.research_request,
-            "model_attempts": list(run.model_attempts),
+            "model_attempts": run.model_attempts,
             "model_response_failures": [{"operation": operation, "category": category, "count": count}
                                         for (operation, category), count in sorted(failures.items())],
             "implementation_sha256_at_start": dict(run.implementation),
@@ -266,9 +321,11 @@ class ResearchReport(ClosedRecord):
                         "limits": vars(run.limits),
                         "method": "Found-parameter learning and calculation-step progress are separate additive components, each with weight 1. "
                         "Retained physical defaults and calculated intermediates are excluded from values-to-find coverage. "
-                        "An executed, accepted calculation earns 0.125: 0.025 for reusable completed work and 0.100 for a current result. "
-                        "Requested outputs use the greater of that floor and current support. When dependencies become stale, "
-                        "only 0.025 remains; recalculation restores current-result credit. Enumeration, unsuccessful calls and repetition earn no gain. "
+                         "Calculation rates and the requested-output multiplier are recorded in global_scientific_goal.calculation_steps.credit_policy. "
+                         "Accepted current intermediates earn the base completion floor. Requested outputs multiply the greater of that floor "
+                         "and current support, including each method/current/support credit component. When dependencies become stale, "
+                         "only the applicable method credit remains; recalculation restores current-result credit. Rejected or incomplete "
+                         "model reviews earn no calculation credit. Enumeration, unsuccessful calls and repetition earn no gain. "
                         "Intermediate steps retain their own dependencies and are optional routes, not additional requested conclusions. "
                         "Found-parameter learning retains its evidence scoring independently of calculation validity. "
                         "Completion requires supported requested outputs and calibration lineage in a coherent parameterization. "
@@ -344,13 +401,22 @@ class ResearchReport(ClosedRecord):
         calculations = goal.get("calculation_steps", {})
         if calculations.get("steps"):
             scores = goal.get("scores", {})
+            policy = calculations.get("credit_policy", {})
+            endpoint_rates = policy.get("requested_output_rates")
+            if endpoint_rates:
+                lines.extend([
+                    f"Requested-output credit: {endpoint_rates['completion_floor']:g} for an accepted current result, "
+                    f"up to {endpoint_rates['fully_supported']:g} with full support; "
+                    f"{endpoint_rates['reusable_completion']:g} remains when it needs updating. "
+                    f"Intermediate credit: {policy['completion_floor']:g} when accepted and current; "
+                    f"{policy['reusable_completion']:g} remains when stale. Rejected or incomplete reviews earn zero.", ""])
             status_labels = {"not_calculated": "not calculated",
                 "calculated_up_to_date": "calculated & up to date",
                 "calculated_needs_updating": "calculated needs updating"}
             lines.extend(["## Calculation Progress", "",
                 f"Found-parameter credit: {scores.get('found_parameters', 0):.3f}. "
                 f"Calculation-step credit: {scores.get('calculation_steps', 0):.3f}.", "",
-                "Optional steps earn credit when executed. A stale result retains 0.025 for prior completed work; "
+                "Accepted calculations earn credit under the recorded policy. A stale result retains its method credit for prior completed work; "
                 "its current-result credit returns after recalculation. Ready means inputs are available for an explicit choice.", "",
                 "| Target scenario | Calculation | Kind | Computed value | Units | Status | Credit | Ready | Changed inputs / reason |",
                 "| --- | --- | --- | ---: | --- | --- | ---: | --- | --- |"])

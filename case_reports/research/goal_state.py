@@ -203,6 +203,20 @@ def scientific_goal_status(result, metrics):
                              "selected_assumption_key": current["key"],
                              "source_applicability": current.get("source_applicability")}
         target_inputs[subject] = fields
+    from .communication import input_error_view
+    input_errors = input_error_view(ledger, independent)
+    for group in independent:
+        group_ref = "target_group:" + identity(group["group_id"])[:12]
+        related = [(note, effect) for note in input_errors for effect in note["targets"]
+                   if effect["group_ref"] == group_ref]
+        group["error_refs"] = [note["error_ref"] for note, _effect in related]
+        resolutions = {effect["resolution"] for _note, effect in related}
+        group["input_status"] = ("error" if "error" in resolutions else
+                                 "corrected" if "replaced" in resolutions else
+                                 "found" if group["found"] else "missing")
+        for subject in group["subjects"]:
+            target_inputs[subject][group["parameter"]].update(
+                error_refs=group["error_refs"], input_status=group["input_status"])
     recorded_target_inputs = sum(row["found"] for row in independent)
     required_target_inputs = len(independent)
     assumption_coverage = {"fulfilled": sum(row["reviewed"] for row in independent),
@@ -212,6 +226,23 @@ def scientific_goal_status(result, metrics):
                    "discovery_points": row["discovery_points"], "learning_bonus": row["learning_bonus"]}
                   for row in independent]
     calculations = calculation_step_status(result, metrics)
+    steps = {(row["subject"], row["field"]): row for row in calculations["steps"]}
+    def calculation_inputs(subject, field, visited=frozenset()):
+        if field in visited:
+            return set()
+        dependencies = {field}
+        for route in steps.get((subject, field), {}).get("routes", ()):
+            for name in route["inputs"]:
+                dependencies.update(calculation_inputs(subject, name, visited | {field}))
+        return dependencies
+    for step in calculations["steps"]:
+        dependencies = calculation_inputs(step["subject"], step["field"])
+        related = [(note, effect) for note in input_errors for effect in note["targets"]
+                   if step["subject"] in effect["subjects"] and effect["field"] in dependencies]
+        step["error_refs"] = list(dict.fromkeys(note["error_ref"] for note, _effect in related))
+        resolutions = {effect["resolution"] for _note, effect in related}
+        step["input_status"] = ("error" if "error" in resolutions else
+                                "corrected" if "replaced" in resolutions else None)
     scores = {"found_parameters": round(sum(row["points"] for row in components), 10),
               "calculation_steps": calculations["points"]}
     components.extend({"category": "calculation_steps", "field": row["field"],
@@ -223,6 +254,7 @@ def scientific_goal_status(result, metrics):
                                        "required": required_target_inputs},
             "independent_target_values": independent,
             "calculation_steps": calculations,
+             "input_errors": input_errors,
             "target_inputs": target_inputs,
             "source_target_learning": source_learning,
             "requested_outputs": requested,

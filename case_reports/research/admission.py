@@ -36,6 +36,11 @@ SOURCE_UNITS = {
     field: sorted({unit} | {printed for printed, target in CONVERSIONS if target == unit})
     for field, unit in UNITS.items()
 }
+NUMERIC_CONSTRAINT_FIELDS = {
+    "interval": ("minimum", "maximum", "minimum_inclusive", "maximum_inclusive"),
+    "lower_bound": ("minimum", "minimum_inclusive"),
+    "upper_bound": ("maximum", "maximum_inclusive"),
+}
 
 
 def extraction_response_schema(source):
@@ -54,8 +59,16 @@ def extraction_response_schema(source):
                       "description": "Select an equivalent notation from accepted_source_units for this field, preserving the source's printed numeric value and scale. For example, hour and h are equivalent labels, but h and s have different scales. Do not convert the number yourself. If no unit represents the reported quantity, preserve it as qualitative evidence rather than renaming the quantity or dropping its dimensions."},
              "kind": {"type": "string", "enum": ["request_constraint"] if source == "request" else
                       ["source_observation", "source_model_parameter"]}}
+    constraint = {"oneOf": [{"type": "object", "additionalProperties": False,
+        "required": ["field", "relation", "unit", *names], "properties": {
+            "field": {"type": "string", "enum": sorted(UNITS)},
+            "relation": {"const": relation}, "unit": facts["unit"],
+            **{name: {"type": "boolean" if name.endswith("_inclusive") else "number"} for name in names},
+        }} for relation, names in NUMERIC_CONSTRAINT_FIELDS.items()]}
     evidence = {**shared, "claim": {**text, "description":
                "Source-supported qualitative claim, range, bound, equation or applicability condition."},
+                "numeric_constraints": {"type": "array", "items": constraint,
+                    "description": "Typed ranges and bounds in this evidence's exact quote. Preserve printed endpoints and accepted source units; deterministic conversion stores canonical bounds. Exact scalar values belong in facts, not this array. Each entry inherits this evidence record's source, quote and context. Use [] when no declared quantity and supported unit faithfully represent the measurement; do not invent a mapping for an unrelated native quantity."},
                 "evidence_role": {"type": "string", "enum": ["request_constraint"] if source == "request" else
                     ["observation", "model_statement", "context"],
                     "description": "Observation reports an empirical event, measurement or outcome, including ranges. A model statement is a formula, fitted parameter, assumption or hypothetical case, not an observation."},
@@ -66,16 +79,14 @@ def extraction_response_schema(source):
                            "description": "Declared quantities or conditions this evidence informs, not necessarily quantities measured directly in the source",
                            "items": {"type": "string", "enum": sorted(EVIDENCE_FIELDS)}}}
     return {"type": "object", "additionalProperties": False,
-            "required": ["facts", "evidence", "findings"], "properties": {
+            "required": ["facts", "evidence"], "properties": {
                 "facts": {"type": "array", "items": {"type": "object", "additionalProperties": False,
                           "required": list(facts), "properties": facts}},
                 "evidence": {"type": "array", "items": {"type": "object", "additionalProperties": False,
                              "required": list(evidence), "properties": evidence,
                              "allOf": [{"if": {"properties": {"evidence_role": {
                                  "enum": ["model_statement", "context", "request_constraint"]}}},
-                                 "then": {"properties": {"observed_fields": {"maxItems": 0}}}}]}},
-                "findings": {"type": "array", "items": {"type": "string"},
-                             "description": "Limitations, contradictions and remaining information needs; not new evidence."}}}
+                                  "then": {"properties": {"observed_fields": {"maxItems": 0}}}}]}}}}
 
 
 def canonical_notation(unit):
@@ -137,6 +148,15 @@ def review_candidates(agent, request, source_version):
             seen.add(index)
             if type(decision.get("admit")) is not bool or not isinstance(decision.get("reason"), str) or not decision["reason"].strip():
                 raise ValueError("Review requires boolean admit and a reason")
+            constraint_count = len(candidates[index]["normalized"].get("numeric_constraints", ()))
+            if constraint_count and "accepted_numeric_constraints" not in decision:
+                raise ValueError("Review must explicitly identify accepted numeric constraints")
+            selected = decision.get("accepted_numeric_constraints", [])
+            if (not isinstance(selected, list)
+                    or any(type(item) is not int or not 0 <= item < constraint_count for item in selected)
+                    or len(set(selected)) != len(selected)
+                    or (not decision["admit"] and selected)):
+                raise ValueError("Accepted numeric constraints must be unique valid indices on an admitted record")
         return decisions
     except (ProviderError, OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         # Keep discovery distinct from independent admission, even if the latter cannot finish.
@@ -177,7 +197,7 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
     response = agent({
         "operation": "extract_research_evidence", "objective": objective,
         "question": question, "context": context,
-        "previous_attempt_findings": list(feedback),
+        "previous_attempt_results": list(feedback),
         "canonical_units": UNITS, "accepted_source_units": SOURCE_UNITS,
         "model_conditions": CONDITIONS, "source": source, "source_text": text,
         "response_contract": extraction_response_schema(source),
@@ -189,6 +209,15 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
             "without changing the printed numeric value. The deterministic converter handles scale "
             "changes after extraction. If the printed quantity or scale has no supported representation, "
             "retain it as qualitative evidence with its original numbers, units and meaning. "
+            "For each qualitative evidence record, also fill numeric_constraints for any faithfully "
+            "represented declared quantity: interval uses minimum, maximum and their inclusive flags; "
+            "lower_bound uses minimum and minimum_inclusive; upper_bound uses maximum and "
+            "maximum_inclusive. Supply printed finite endpoints and accepted "
+            "source units, without converting the numbers yourself. A strict inequality has its "
+            "inclusive flag false. Never choose an endpoint or midpoint as a scalar fact. These "
+            "constraints supplement the source record; a faithful scalar value still belongs in facts. "
+            "Use [] for equations, ambiguous OCR, unsupported native quantities or unsupported units. "
+            "Do not combine different activity-specific bounds into one interval. "
             "Filtration efficiency is not penetration, per-person flow is not total flow, and RNA "
             "concentration is not a virion or quanta concentration. Related measurements can support "
             "later explicit inferences but must not be relabeled as those inferred quantities. "
@@ -283,7 +312,50 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
             item.update(source=source, quote=quote_span(raw["quote"]),
                         source_version=source_version,
                         kind="request_constraint" if source == "request" else "source_evidence")
-            candidates.append((raw, item))
+            constraints = raw.get("numeric_constraints", [])
+            if not isinstance(constraints, list):
+                diagnostics.append({"stage": "extraction", "category": "invalid_candidate", "status": "rejected",
+                    "source": source, "why": "numeric_constraints must be a list", "proposal": constraints})
+                constraints = []
+            item["numeric_constraints"], accepted_constraints = [], []
+            for constraint in constraints:
+                try:
+                    if not isinstance(constraint, dict):
+                        raise ValueError("Each numeric constraint must be an object")
+                    relation = constraint.get("relation")
+                    if (relation not in NUMERIC_CONSTRAINT_FIELDS
+                            or set(constraint) != {"field", "relation", "unit", *NUMERIC_CONSTRAINT_FIELDS[relation]}):
+                        raise ValueError("Numeric constraint fields must match its declared relation")
+                    field = constraint["field"]
+                    if field not in UNITS:
+                        raise ValueError("Numeric constraint requires a declared quantity")
+                    target_unit = UNITS[field]
+                    printed_unit = canonical_notation(constraint["unit"])
+                    factor = 1 if printed_unit == target_unit else CONVERSIONS.get((printed_unit, target_unit))
+                    if factor is None:
+                        raise ValueError("Numeric constraint has no supported canonical unit conversion")
+                    normalized = {"field": field, "relation": relation, "unit": target_unit}
+                    for name in NUMERIC_CONSTRAINT_FIELDS[relation]:
+                        value = constraint[name]
+                        if name.endswith("_inclusive"):
+                            if type(value) is not bool:
+                                raise ValueError("Numeric constraint inclusivity must be boolean")
+                            normalized[name] = value
+                        else:
+                            if type(value) not in (int, float):
+                                raise ValueError("Numeric constraint values must be finite JSON numbers")
+                            normalized[name] = finite(finite(value, name) * factor, name)
+                    if relation == "interval" and (normalized["minimum"] > normalized["maximum"]
+                            or (normalized["minimum"] == normalized["maximum"] and not (
+                                normalized["minimum_inclusive"] and normalized["maximum_inclusive"]))):
+                        raise ValueError("Numeric constraint interval is empty or reversed")
+                    item["numeric_constraints"].append(normalized)
+                    accepted_constraints.append(constraint)
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    diagnostics.append({"stage": "extraction", "category": "invalid_candidate", "status": "rejected",
+                        "source": source, "field": constraint.get("field") if isinstance(constraint, dict) else None,
+                        "why": str(exc), "proposal": constraint})
+            candidates.append(({**raw, "numeric_constraints": accepted_constraints}, item))
         except (KeyError, TypeError, ValueError) as exc:
             diagnostics.append({"stage": "extraction", "category": "invalid_candidate", "status": "rejected", "source": source,
                                 "why": str(exc), "proposal": raw})
@@ -301,7 +373,13 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
                                 "canonical_unit": fact.unit,
                                 "factor": 1 if canonical_notation(raw["unit"]) == fact.unit else
                                           CONVERSIONS[(canonical_notation(raw["unit"]), fact.unit)]}}
-                               if isinstance(fact, Fact) else {})}
+                               if isinstance(fact, Fact) else {
+                                   "numeric_constraint_conversions": [{"index": index,
+                                       "printed": printed, "canonical": normalized,
+                                       "factor": 1 if canonical_notation(printed["unit"]) == normalized["unit"] else
+                                           CONVERSIONS[(canonical_notation(printed["unit"]), normalized["unit"])]}
+                                       for index, (printed, normalized) in enumerate(
+                                           zip(raw["numeric_constraints"], fact["numeric_constraints"]))]})}
                            for i, (raw, fact) in enumerate(candidates)],
             "instruction": (
                 "Independently verify each numerical value and unit against its quote and source. "
@@ -323,7 +401,19 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
                 "A source's hypothetical room inputs remain source model parameters; they need "
                 "not estimate the parameter of the current investigation. Do not require a "
                 "numerical contribution to that local question. "
-                " Qualitative claims must be entailed by the quoted passage. Their fields are relevance "
+                " Qualitative claims must be entailed by the quoted passage. "
+                "Verify each normalized numeric_constraint against its original quote, "
+                "including the measured quantity, interval or inequality, endpoint inclusivity and "
+                "activity/population qualifiers. numeric_constraint_conversions gives its printed and "
+                "canonical forms and deterministic factor. Do not require a converted bound to appear "
+                "verbatim in the source. Constraints inherit this record's source and context; they "
+                "are reported bounds, not selected target inputs. For qualitative records, "
+                "admit judges the original claim, attribution and evidence fields independently of "
+                "the supplemental constraints. accepted_numeric_constraints lists only the zero-based "
+                "indices of normalized constraints faithfully represented by the quote; omit an "
+                "unsupported constraint without rejecting otherwise faithful qualitative evidence. "
+                "Use [] for numeric facts, records with no constraints, rejected records, or when no "
+                "constraint is supported. Explain any omitted constraints in reason. The qualitative record's fields are relevance "
                 "tags, not assertions that the source directly measures those quantities. A related "
                 "measurement or model relation can inform a downstream parameter. Do not reject a "
                 "source-supported claim merely because a relevance tag names an inferred quantity. "
@@ -342,10 +432,20 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
                     "decisions": {"type": "array", "minItems": len(candidates), "maxItems": len(candidates),
                         "description": "Exactly one independent decision for each candidate option, without repeats",
                         "items": {"type": "object", "additionalProperties": False,
-                            "required": ["option", "admit", "reason"], "properties": {
+                            "required": ["option", "admit", "reason", "accepted_numeric_constraints"], "properties": {
                                 "option": {"type": "integer", "enum": list(range(len(candidates)))},
-                                "admit": {"type": "boolean", "description": "True for a faithful native source record, regardless of target relevance. False only for an error in source representation, quantity, attribution or entailment."},
-                                "reason": {"type": "string", "minLength": 1}}}}}},
+                                "admit": {"type": "boolean", "description": "True for a faithful native source record, regardless of target relevance. For qualitative evidence, decide its original claim and fields independently of supplemental numeric constraints. False only for an error in source representation, quantity, attribution or entailment."},
+                                "reason": {"type": "string", "minLength": 1},
+                                "accepted_numeric_constraints": {"type": "array", "uniqueItems": True,
+                                    "items": {"type": "integer", "minimum": 0},
+                                    "description": "Zero-based indices of faithful normalized numeric constraints; [] for numeric facts, no constraints, rejected records, or no faithful constraints."}},
+                            "allOf": [*({"if": {"properties": {"option": {"const": index}}},
+                                "then": {"properties": {"accepted_numeric_constraints": {
+                                    "items": {"type": "integer", "enum": list(range(len(item["numeric_constraints"])))}
+                                        if not isinstance(item, Fact) and item["numeric_constraints"] else False}}}}
+                                for index, (_raw, item) in enumerate(candidates)),
+                                {"if": {"properties": {"admit": {"const": False}}},
+                                 "then": {"properties": {"accepted_numeric_constraints": {"maxItems": 0}}}}]}}}},
         }, source_version)
         for decision in decisions:
             index = decision["option"]
@@ -354,19 +454,23 @@ def extract_and_admit(agent, *, text, source, objective, context, question, feed
                 if isinstance(item, Fact):
                     admitted.append(item)
                 else:
-                    evidence.append(item)
+                    selected = set(decision.get("accepted_numeric_constraints", ()))
+                    evidence.append({**item, "numeric_constraints": [constraint
+                        for index, constraint in enumerate(item["numeric_constraints"]) if index in selected]})
+                    for constraint_index, constraint in enumerate(item["numeric_constraints"]):
+                        if constraint_index not in selected:
+                            diagnostics.append({"stage": "applicability_review", "category": "rejected_evidence",
+                                "status": "rejected", "source": source, "field": constraint["field"],
+                                "why": decision["reason"], "proposal": constraint})
             else:
                 item = candidates[index][1]
                 field = item.field if isinstance(item, Fact) else item["claim"]
                 diagnostics.append({"stage": "applicability_review", "category": "rejected_evidence", "status": "rejected",
                                     "source": source, "claim": field, "why": decision["reason"],
                                     "proposal": candidates[index][0]})
-    findings = response.get("findings", [])
-    if not isinstance(findings, list) or any(not isinstance(v, str) for v in findings):
-        raise ValueError("Findings must be a list of text")
     if not rows and not qualitative:
-        diagnostics.append({"stage": "extraction", "category": "no_relevant_evidence", "source": source,
-                            "why": "The reading returned no relevant evidence", "findings": findings})
-    return ResearchResult(tuple(admitted), findings=tuple(findings),
+        diagnostics.append({"stage": "extraction", "category": "no_relevant_evidence", "status": "completed", "source": source,
+                            "why": "The reading returned no relevant evidence"})
+    return ResearchResult(tuple(admitted),
                           evidence=tuple(evidence), diagnostics=tuple(diagnostic_value(d) for d in diagnostics),
                           evaluated=not (rows or qualitative) or bool(candidates))

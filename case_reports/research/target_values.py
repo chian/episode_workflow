@@ -7,6 +7,16 @@ from .scenario_sharing import independent_groups
 from ...task_executors.scenario_metrics.evaluate import UNITS, validate_parameter
 
 
+def invalidated_source_records(result):
+    """Exact recorded-input errors, including corrections made before execution."""
+    assumptions = result.assumptions.values() if isinstance(result.assumptions, dict) else result.assumptions
+    records = [row for assumption in assumptions for row in assumption.get("invalidated_evidence", ())]
+    records.extend(row for diagnostic in result.diagnostics
+                   if diagnostic.get("stage") == "input_record_correction"
+                   for row in diagnostic.get("invalidated_evidence", ()))
+    return tuple({evidence_key(row): row for row in records}.values())
+
+
 def _source_value_lineage(ledger, fact, invalid, visiting=frozenset()):
     """Return current calculation/source provenance, independently of support grades."""
     if fact.key in visiting or evidence_key(fact.semantic_record()) in invalid:
@@ -98,8 +108,7 @@ def eligible_source_values(ledger):
     """Native values and current source calculations can fill existing target needs."""
     if not isinstance(ledger, Ledger):
         ledger = Ledger(ledger)
-    invalid = {evidence_key(row) for assumption in ledger.assumptions.values()
-               for row in assumption.get("invalidated_evidence", ())}
+    invalid = {evidence_key(row) for row in invalidated_source_records(ledger)}
     eligible = []
     for fact in ledger.facts.values():
         if fact.kind not in {"source_observation", "source_model_parameter", "derived"}:
@@ -123,8 +132,7 @@ def source_value_profile(ledger, fact):
         "facts": [{"field": fact.field, "value": fact.value, "unit": fact.unit,
                    "kind": fact.kind, "quote": fact.quote, "source_version": fact.source_version}]}
     if fact.kind == "derived":
-        invalid = {evidence_key(row) for assumption in ledger.assumptions.values()
-                   for row in assumption.get("invalidated_evidence", ())}
+        invalid = {evidence_key(row) for row in invalidated_source_records(ledger)}
         profile["derivation"] = _source_value_lineage(ledger, fact, invalid)
         profile["source_scenario"] = ledger.scenarios.get(fact.subject, {})
     return profile
@@ -169,8 +177,7 @@ def target_value_candidates(ledger):
     evidence = {identity(row): row for row in ledger.evidence_options().values()}
     from .records import numeric_provenance
     numeric = numeric_provenance(ledger)
-    invalid = {evidence_key(row) for assumption in ledger.assumptions.values()
-               for row in assumption.get("invalidated_evidence", ())}
+    invalid = {evidence_key(row) for row in invalidated_source_records(ledger)}
     for assumption in ledger.assumptions.values():
         if (assumption.get("entry_type") == "source_candidate"
                 or assumption.get("source_candidate_unavailable")

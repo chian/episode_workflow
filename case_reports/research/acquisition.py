@@ -107,7 +107,13 @@ class StrategySource(ResearchSource):
                 for decision in decisions:
                     type_id = decision["type_id"]
                     if type_id == "new":
-                        type_id = f"{self.goal.goal_id}:type:{next_number}"
+                        # A source group is scientific state, not an episode
+                        # identity. Its key must survive a child-to-parent return.
+                        type_id = "source_type:" + identity({
+                            "source": source, "subjects": sorted(decision["subjects"]),
+                            "description": decision["description"], "basis": decision["basis"],
+                            "sequence": next_number,
+                        })
                         next_number += 1
                     group = groups.setdefault(type_id, {"members": []})
                     group.update(description=decision["description"], basis=decision["basis"],
@@ -142,7 +148,7 @@ class StrategySource(ResearchSource):
             },
             instruction=(
                 "Propose a search addressing the delegated uncertainty and unresolved hypotheses in the parent information contract. "
-                "Use prior findings and failure implications to distinguish resolved from open questions. "
+                "Use returned parameter_results, reviews, calculations, reading_coverage and operations to identify remaining inputs and failed attempts. "
                 "Your investigation parent owns candidate assumption proposals and their reasonableness "
                 "assessment of inferred hypotheses. Every extracted native numeric value is automatically "
                 "compared with target parameter needs and added to matching target groups. The highest "
@@ -159,7 +165,7 @@ class StrategySource(ResearchSource):
                 "calculation tables; useful values for other target parameters also count automatically. "
                 "A query or objective cannot add scored requirements. "
                 "Give the child only its specific information question, including necessary context. "
-                "Its brief return should explain trends and implications for your next decision. "
+                "Its return contains defined JSON fields populated from the existing work responses and execution records. "
                 "Do not repeat an identical query."),
             response_contract={"type": "object", "additionalProperties": False,
                 "required": ["query", "objective"], "properties": {
@@ -197,7 +203,7 @@ class SearchSource(ResearchSource):
                     "objective": {"type": "string", "minLength": 1,
                                   "description": "Evidence to seek in the selected source"},
                     "rationale": {"type": "string", "minLength": 1}}},
-            instruction="Select for the still-unresolved delegated question using prior source findings and failure implications, including contrary evidence. Give the source child a specific question and necessary context, not your entire assignment. Its brief synthesis should inform your next source choice. Do not prefer breadth for its own sake or treat a failed retrieval as scientific disproof. Return an instance of the JSON Schema: the source choice belongs in option_id. Numerical yield controls continuation."))
+            instruction="Select for the still-unresolved delegated question using returned parameter_results, reviews, calculations, reading_coverage and operations. Give the source child a specific question and necessary context. A missing returned value and a failed reading do not establish absence of evidence. Return an instance of the JSON Schema: the source choice belongs in option_id. Numerical yield controls continuation."))
         self.last_proposal = proposal
         return proposal
 
@@ -326,8 +332,8 @@ class PageSource(ResearchSource):
                 "Earlier reading under a different question does not rule out a useful reread. "
                 "Distinguish unread material from examined material that did not answer "
                 "the question. Give the reader that specific question and necessary context; "
-                "its brief synthesis should explain findings or failed-route trends relevant to your "
-                "next reading choice. Do not hand it the whole parent assignment. No fixed reading order, "
+                "its JSON return supplies parameter_results, reviews, calculations, reading_coverage, "
+                "operations and completion for your next reading choice. No fixed reading order, "
                 "no mandatory reading choice. You do not decide continuation."),
             response_contract={"type": "object", "additionalProperties": False,
                 "required": ["option", "question"], "properties": {
@@ -460,14 +466,11 @@ class ReadingSource(ResearchSource):
                     proposed_memory = self.memory
             return response
 
-        communication = self.communication_context()
         try:
             result = extract_and_admit(agent, text="\n".join(s.text for s in spans),
                 source=self.document.source, objective=str(self.goal.objective),
                 context=self.context(), question=question,
-                feedback=(*communication["findings"],
-                          *(f"{failure.get('stage', 'operation')}: {failure['why']}"
-                            for failure in communication["unprocessed_diagnostics"])),
+                feedback=(self.parent_report(self.ledger.result()),),
                 source_spans={k: s.text for k, s in allowed.items()}, source_version=self.document.sha256)
         except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
             result = self.failure_result(exc, "source_reading")

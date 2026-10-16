@@ -5,10 +5,10 @@ The proposer cannot set its own credit or turn a conditional claim into evidence
 """
 
 from ...task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS, validate_parameter
-from ...task_executors.scenario_metrics.catalog import METRICS
+from ...task_executors.scenario_metrics.catalog import METRICS, PARAMETER_MEANINGS
 from .records import Credit, Fact, ResearchResult, identity, assessment_summary, assumption_claim, current_support
 from .scenarios import check_case_inputs
-from .progress import parameter_support, found_parameter_progress
+from .progress import evidence_key, parameter_support, found_parameter_progress
 from .verification import CALIBRATION_PROGRESS, calibration_progress, target_calibration_progress
 from .model_defaults import retained_defaults
 
@@ -22,6 +22,104 @@ RUBRIC = {
 
 # One rubric increment for a new usable computation; this is not evidence quality.
 PROVISIONAL_OUTPUT_CREDIT = 1 / (2 * len(RUBRIC))
+
+INPUT_ERROR_CODES = {
+    "quantity_mismatch": "The recorded canonical field names a different physical quantity from the source statement; matching units alone do not establish matching meaning.",
+    "value_mismatch": "The recorded number does not represent the number in the cited source after the stated conversion.",
+    "unit_mismatch": "The recorded unit or unit conversion does not match the cited source quantity.",
+    "source_attribution_mismatch": "The recorded subject or source attribution is demonstrably different from the cited observation or model parameter.",
+}
+
+
+def input_error_schema(evidence):
+    """The existing scientific review can correct exact misrecorded source inputs."""
+    return {"type": "array", "uniqueItems": True,
+        "description": "Exact source records with demonstrated recording errors. Weak support, an uncertain transfer, a different scenario, or valid contradictory evidence are not recording errors. [] means no demonstrated recording error.",
+        "items": {"type": "object", "additionalProperties": False,
+            "required": ["evidence_ref", "error"], "properties": {
+                "evidence_ref": {"type": "string", "enum": list(evidence)} if evidence else False,
+                "error": {"type": "string", "enum": list(INPUT_ERROR_CODES)},
+            }}}
+
+
+def correct_input_records(entries, evidence, ledger):
+    """Persist exact input corrections and withdraw dependent mappings immediately.
+
+    The caller supplies the JSON from its existing review. This function performs
+    no scientific judgment, model call, value override, or relevance adjustment.
+    """
+    if not isinstance(entries, list):
+        raise ValueError("invalid_evidence must be a list of typed input errors")
+    parsed, seen = [], set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"evidence_ref", "error"}:
+            raise ValueError("An input error requires evidence_ref and error")
+        ref, code = entry["evidence_ref"], entry["error"]
+        if (not isinstance(ref, str) or ref not in evidence
+                or not isinstance(code, str) or code not in INPUT_ERROR_CODES):
+            raise ValueError("Input errors must identify supplied evidence and a declared recording-error code")
+        if ref in seen:
+            raise ValueError("A source record may have only one primary recording error per review")
+        seen.add(ref)
+        row = evidence[ref]
+        if row.get("kind") not in {"source_observation", "source_model_parameter", "source_evidence"}:
+            raise ValueError("Input corrections must identify a source record, not a requester condition or hypothesis")
+        parsed.append((row, code))
+    if not parsed:
+        return ResearchResult()
+    selected = found_parameter_progress(ledger.result(), ledger=ledger)
+    previous_errors = {item["error_id"]: item for assumption in ledger.assumptions.values()
+                       for item in assumption.get("input_errors", ())}
+    previous_errors.update((item["input_error"]["error_id"], item["input_error"])
+        for item in ledger.diagnostics if item.get("stage") == "input_record_correction"
+        and isinstance(item.get("input_error"), dict))
+    updates, diagnostics = {}, []
+    for row, code in parsed:
+        record_key = evidence_key(row)
+        fact_keys = sorted(fact.key for fact in ledger.facts.values()
+                           if evidence_key(fact.semantic_record()) == record_key)
+        affected = []
+        for key, assumption in ledger.assumptions.items():
+            derivation = assumption.get("derivation", {})
+            if (set(fact_keys).intersection(assumption.get("source_fact_keys", ()))
+                    or set(fact_keys).intersection(derivation.get("input_fact_keys", ()))
+                    or identity(row) in derivation.get("source_evidence_ids", ())):
+                affected.append(key)
+        selected_before = [{"subject": subject, "group_id": target["group_id"],
+                "assumption_key": target["selected_assumption_key"],
+                "value": target["value"], "unit": target["unit"]}
+            for target in selected if target.get("selected_assumption_key") in affected
+            for subject in target["subjects"]]
+        error = {"error_id": identity(["input_record_correction", record_key,
+                    row.get("source_version", ""), code]),
+            "field": row.get("field"), "fields": list(row.get("fields", ())),
+            "value": row.get("value"), "unit": row.get("unit"), "error_code": code,
+            "evidence_key": record_key, "source_fact_keys": fact_keys,
+            "affected_assumption_keys": sorted(affected), "selected_before": selected_before,
+            "source": row.get("source", ""), "source_subject": row.get("subject"),
+            "source_version": row.get("source_version", "")}
+        old_error = previous_errors.get(error["error_id"], {})
+        error["selected_before"] = list({identity(item): item for item in (
+            *old_error.get("selected_before", ()), *selected_before)}.values())
+        for name in ("source_fact_keys", "affected_assumption_keys"):
+            error[name] = sorted(set(old_error.get(name, ())) | set(error[name]))
+        if error != old_error:
+            diagnostics.append({"stage": "input_record_correction", "category": code,
+                "status": "applied", "input_error": error, "invalidated_evidence": [row]})
+        for key in affected:
+            previous = updates.get(key, ledger.assumptions[key])
+            invalid = list(previous.get("invalidated_evidence", ()))
+            if row not in invalid:
+                invalid.append(row)
+            errors = {item["error_id"]: item for item in previous.get("input_errors", ())}
+            errors[error["error_id"]] = error
+            revised = {**previous, "invalidated_evidence": invalid,
+                "input_errors": list(errors.values()), "source_candidate_unavailable": True}
+            revised.pop("version", None)
+            revised["version"] = identity(revised)
+            if revised != previous:
+                updates[key] = revised
+    return ResearchResult(assumptions=tuple(updates.values()), diagnostics=tuple(diagnostics))
 
 
 def text(value, name):
@@ -59,8 +157,7 @@ def reasonableness_response_schema(evidence, request_evidence=()):
                 "description": "Admitted evidence supporting this exact parameter value or condition in its stated context, including justified indirect support. Background and contrary evidence do not belong here."},
             "contradicting_evidence": {"type": "array", "uniqueItems": True, "items": evidence_item,
                 "description": "Admitted evidence opposing this claim in comparable conditions. Different contexts or values are not automatically contradictions; explain applicability in the review."},
-            "invalid_evidence": {"type": "array", "uniqueItems": True, "items": evidence_item,
-                "description": "Evidence records with an identified extraction or attribution error, explained in the review. A valid observation disagreeing with the hypothesis is contrary evidence, not invalid evidence."},
+            "invalid_evidence": input_error_schema(evidence),
             "request_constraint": {"type": ["object", "null"], "additionalProperties": False,
                 "description": "Explicit requester condition instantiated by this candidate, or null for a scientific hypothesis. This is scope classification, not empirical support.",
                 "required": ["evidence", "reason"], "properties": {
@@ -204,7 +301,7 @@ def candidate_response_schema(*, scenarios=None, evidence=None, numeric_inputs=N
     inferred = {
         "entry_type": {"const": "best_guess", "description": "An LLM-inferred parameter, not a directly reported source fact"},
         "source_refs": references(evidence, "Admitted evidence used in this inference; [] honestly declares no source support yet"),
-        "input_refs": references(numeric_inputs, "Existing numeric inputs used in the recasting or calculation; preserve their native meaning"),
+        "input_refs": references(numeric_inputs, "Existing numeric operands actually used in the recasting or calculation; do not include a rejected value merely to contrast it with the proposed value. Preserve each operand's native meaning"),
         "added_assumptions": {"type": "array", "items": prose,
                               "description": "Explicit approximations or transfer assumptions added by this inference"},
     }
@@ -339,6 +436,7 @@ def assess_assumption(agent, action, ledger, context, *, source_candidate_key=No
     review = agent({
         "operation": "assess_assumption_reasonableness", "candidate": claim,
         "evidence": evidence, "context": context, "rubric": RUBRIC, **inference,
+        "parameter_meanings": PARAMETER_MEANINGS, "input_error_codes": INPUT_ERROR_CODES,
         "previous_assessments": [assessment_summary(a) for a in ledger.assumptions.values()
                                  if a["subject"] == subject and a["field"] == field],
         "instruction": (
@@ -350,7 +448,8 @@ def assess_assumption(agent, action, ledger, context, *, source_candidate_key=No
             "For a best_guess entry, check the recasting, arithmetic, dimensional meaning and added "
             "assumptions stated in basis and derivation against derivation_inputs and the source evidence. "
             "A source_candidate is an automatically recorded conditional transfer of a native source "
-            "value to a target parameter group, preserving quantity and unit. Assess that transfer's "
+            "value to a target parameter group. Check whether the recorded field actually preserves "
+            "the source quantity; automatic mapping does not establish that it does. Assess that transfer's "
             "scientific support and limitations; its automatic origin is not a reason to reject it. "
             "source_applicability is a separate relevance judgment, not established physical support. "
             "proposed_source_refs records the proposer's claimed support, not your admission decision; "
@@ -367,8 +466,16 @@ def assess_assumption(agent, action, ledger, context, *, source_candidate_key=No
             "conflicts; never choose a value by majority vote or number of sources. Evidence cited "
             "to explain a limitation is not automatically corroboration. Each reference may appear "
             "in at most one of these two lists. "
-            "Use invalid_evidence only for identified errors in extraction or attribution, not "
-            "because valid evidence disagrees with a hypothesis. Explain the specific error. "
+            "Use invalid_evidence for demonstrated recording errors, with the exact evidence_ref and "
+            "one declared error code. Compare the recorded canonical field's parameter_meaning to "
+            "the cited source quantity, as well as its number, unit and attribution. If the source "
+            "describes a different physical quantity from the stored field, record quantity_mismatch "
+            "even when the source quotation and number are copied faithfully and the units agree. "
+            "Do not leave a demonstrated recording error only in explanation or contradicting_evidence: "
+            "the typed invalid_evidence entry withdraws that erroneous mapping and dependent inputs, "
+            "then the ordinary main-table relevance selection can use another available value. "
+            "A valid measurement from another context, uncertain transfer, weak support or valid "
+            "contradiction does not constitute a recording error. Explain the specific error. "
             "Valid contradictory evidence advances understanding even when current support falls. "
             "Previously acquired learning is distinct from the latest claim's current support. "
             "Return an instance of the JSON Schema. A supported verdict requires grade 2 in every "
@@ -413,13 +520,15 @@ def assess_assumption(agent, action, ledger, context, *, source_candidate_key=No
     for name in ("limitations", "alternatives", "missing_evidence"):
         texts(review.get(name), name)
     text(review.get("explanation"), "explanation")
-    for name in ("supporting_evidence", "contradicting_evidence", "invalid_evidence"):
+    for name in ("supporting_evidence", "contradicting_evidence"):
         refs = texts(review.get(name), name)
         if any(k not in evidence for k in refs) or len(set(refs)) != len(refs):
             raise ValueError(f"{name} must contain distinct admitted evidence references")
     if set(review["supporting_evidence"]) & set(review["contradicting_evidence"]):
         raise ValueError("The same evidence cannot both support and contradict the same claim")
-    if set(review["invalid_evidence"]) & (set(review["supporting_evidence"]) | set(review["contradicting_evidence"])):
+    correction = correct_input_records(review.get("invalid_evidence"), evidence, ledger)
+    invalid_refs = [entry["evidence_ref"] for entry in review["invalid_evidence"]]
+    if set(invalid_refs) & (set(review["supporting_evidence"]) | set(review["contradicting_evidence"])):
         raise ValueError("An invalid evidence record cannot support or contradict a claim")
     if "request_constraint" not in review:
         raise ValueError("Reasonableness review must classify request_constraint as evidence-linked scope or null")
@@ -451,7 +560,7 @@ def assess_assumption(agent, action, ledger, context, *, source_candidate_key=No
     previous = ledger.assumptions.get(key, {})
     learning = list(previous.get("learning_evidence", ()))
     invalid = list(previous.get("invalidated_evidence", ()))
-    invalid.extend(evidence[ref] for ref in review["invalid_evidence"] if evidence[ref] not in invalid)
+    invalid.extend(evidence[ref] for ref in invalid_refs if evidence[ref] not in invalid)
     if not declared:
         if verdict in {"supported", "provisional"}:
             learning.extend({"relation": "supports", "evidence": evidence[ref]}
@@ -465,15 +574,24 @@ def assess_assumption(agent, action, ledger, context, *, source_candidate_key=No
                   "reasonableness": quality,
                   "role": "request_constraint" if declared else "inferred_assumption",
                   "learning_evidence": learning, "invalidated_evidence": invalid}
+    corrected = {row["key"]: row for row in correction.assumptions}
+    if key in corrected:
+        for name in ("source_candidate_unavailable", "invalidated_evidence", "input_errors"):
+            assessment[name] = corrected[key][name]
+    all_errors = {row["error_id"]: row for row in assessment.get("input_errors", ())}
+    all_errors.update((row["input_error"]["error_id"], row["input_error"])
+                      for row in correction.diagnostics)
+    if all_errors:
+        assessment["input_errors"] = list(all_errors.values())
     assessment.pop("version", None)
     assessment["version"] = identity(assessment)
     facts = ()
-    if field in UNITS and quality > 0 and automatic is None:
+    if field in UNITS and quality > 0 and automatic is None and not assessment.get("source_candidate_unavailable"):
         facts = (Fact(subject, field, value, UNITS[field], "model_assumption", claim["basis"],
                       context=claim["statement"], parents=(key,)),)
-    return ResearchResult(facts=facts, assumptions=(assessment,),
+    return ResearchResult(facts=facts, assumptions=(assessment, *(row for other, row in corrected.items() if other != key)),
                           findings=(review["explanation"],),
-                          diagnostics=({"stage": "assumption_assessment", "category": verdict,
+                          diagnostics=(*correction.diagnostics, {"stage": "assumption_assessment", "category": verdict,
                                         "subject": subject, "field": field, "why": review["explanation"],
                                         "limitations": review["limitations"], "missing_evidence": review["missing_evidence"]},))
 
