@@ -17,10 +17,11 @@ from .records import (
 from .progress import evidence_key
 
 
-COMPLETION_CREDIT = 0.125
-REUSABLE_METHOD_CREDIT = 0.025
+COMPLETION_CREDIT = 12.5
+REUSABLE_METHOD_CREDIT = 2.5
 CURRENT_RESULT_CREDIT = COMPLETION_CREDIT - REUSABLE_METHOD_CREDIT
 REQUESTED_OUTPUT_MULTIPLIER = 2.0
+SUPPORT_CREDIT_BASELINE = 0.125
 
 
 def _step_fields(scenario, outputs):
@@ -121,16 +122,6 @@ def _numerically_completed(record, field, *, derived):
                 and field not in record.get("input_values", record.get("parameters", {})))
     row = record.get("output", record.get("metrics", {})).get(field, {})
     return isinstance(row, Mapping) and output_is_resolved(row)
-
-
-def _historically_completed(record, field, *, derived):
-    review = record.get("model_review", {})
-    dependency = record.get("derived_support" if derived else "metric_support", {}).get(field, record)
-    output = record.get("output", record.get("metrics", {})).get(field, {})
-    return (review.get("admit") is True and review.get("completed", True) is True
-            and not dependency.get("invalidated_dependencies")
-            and (derived or output_meets_contract(output, record.get("output_contracts", {}).get(field)))
-            and _numerically_completed(record, field, derived=derived))
 
 
 def selected_target_snapshot(ledger):
@@ -340,17 +331,18 @@ def _step_alternatives(records, field, subject, scenario, ledger, invalid, *, re
             if not derived and field not in METRICS and field in record.get("input_values", record.get("parameters", {})):
                 continue
             dependency = record.get("derived_support" if derived else "metric_support", {}).get(field, record)
-            accepted = _historically_completed(record, field, derived=derived)
             output = record.get("output", record.get("metrics", {})).get(field, {})
             contract = scenario.get("output_contracts", {}).get(field,
                 record.get("output_contracts", {}).get(field))
             contract_met = derived or output_meets_contract(output, contract)
             fresh = calculation_is_up_to_date(record, field, ledger, derived=derived, invalid=invalid)
-            current = accepted and fresh and admitted_calculation(record, ledger.assumptions, ledger=ledger,
+            support_qualified = fresh and admitted_calculation(record, ledger.assumptions, ledger=ledger,
                 **({"field": field} if derived else {"metric": field}))
-            support = current_support(record, ledger.assumptions, metric=field, ledger=ledger) if current and requested else 0.0
-            points = multiplier * (max(COMPLETION_CREDIT, support) if current
-                                   else REUSABLE_METHOD_CREDIT if accepted else 0.0)
+            support = current_support(record, ledger.assumptions, metric=field, ledger=ledger) if support_qualified and requested else 0.0
+            method_credit = multiplier * REUSABLE_METHOD_CREDIT
+            current_result_credit = multiplier * CURRENT_RESULT_CREDIT if fresh else 0.0
+            support_credit = multiplier * max(0.0, support - SUPPORT_CREDIT_BASELINE) if fresh else 0.0
+            points = method_credit + current_result_credit + support_credit
             versions = record.get("calculation_versions", ())
             version = record.get("version") or (versions[-1] if versions else None)
             changes = _changed_dependencies(dependency, ledger) if not fresh else []
@@ -362,10 +354,6 @@ def _step_alternatives(records, field, subject, scenario, ledger, invalid, *, re
             review = record.get("model_review", {})
             review_status = ("incomplete" if not review.get("completed", True) else
                              "accepted" if review.get("admit") is True else "rejected")
-            uncredited_reason = (None if accepted else
-                review.get("reason", "Model review is incomplete or rejected") if review_status != "accepted"
-                else "Arithmetic completed with invalidated input provenance" if dependency.get("invalidated_dependencies")
-                else "Arithmetic completed but does not meet the requested output contract")
             value_row = record.get("derived_parameters", {}).get(field, {}) if derived else output
             limit = "finite" if derived else value_row.get("limit")
             computed_value = (value_row.get("function") if limit == "function" else
@@ -375,15 +363,15 @@ def _step_alternatives(records, field, subject, scenario, ledger, invalid, *, re
                 "parameterization": record.get("parameterization", record.get("label", record.get("basis", ""))),
                 "calculation_version": version,
                 "status": "calculated_up_to_date" if fresh else "calculated_needs_updating",
-                "accepted_current": current,
+                "accepted_current": support_qualified,
                 "matches_main_selection": not main_differences,
                 "main_input_differences": main_differences,
                 "computed_value": computed_value, "unit": value_row.get("unit", UNITS.get(field)),
                 "computed_limit": limit,
-                "review_status": review_status, "uncredited_reason": uncredited_reason,
-                "points": points, "method_credit": multiplier * REUSABLE_METHOD_CREDIT if accepted else 0.0,
-                "current_result_credit": multiplier * CURRENT_RESULT_CREDIT if current else 0.0,
-                "support_credit": multiplier * max(0.0, support - COMPLETION_CREDIT) if current else 0.0,
+                "review_status": review_status,
+                "points": points, "method_credit": method_credit,
+                "current_result_credit": current_result_credit,
+                "support_credit": support_credit,
                 "input_fields": dependency.get("input_fields", sorted(record.get("input_values", record.get("parameters", {})))),
                 "condition_fields": dependency.get("condition_fields", sorted(record.get("conditions", {}))),
                 "changed_dependencies": changes,
@@ -446,7 +434,6 @@ def calculation_step_status(result, outputs, *, subjects=None):
             requested = field in outputs
             candidates = _step_alternatives(records, field, subject, scenario, ledger, invalid, requested=requested)
             best = _preferred_result(candidates)
-            credit = max(candidates, key=lambda row: row["points"]) if candidates else None
             routes = _requirements(field, set(numeric_options), conditions, numeric_options,
                 scenario.get("calculation_variables", ()))
             status = best["status"] if best else "not_calculated"
@@ -458,24 +445,18 @@ def calculation_step_status(result, outputs, *, subjects=None):
                 "computed_limit": best["computed_limit"] if best else None,
                 "parameterization": best["parameterization"] if best else None,
                 "calculation_version": best["calculation_version"] if best else None,
-                "points": credit["points"] if credit else 0.0,
-                "method_credit": credit["method_credit"] if credit else 0.0,
-                "current_result_credit": credit["current_result_credit"] if credit else 0.0,
-                "support_credit": credit["support_credit"] if credit else 0.0,
-                "accepted_current": any(row["accepted_current"] for row in candidates),
+                "points": best["points"] if best else 0.0,
+                "method_credit": best["method_credit"] if best else 0.0,
+                "current_result_credit": best["current_result_credit"] if best else 0.0,
+                "support_credit": best["support_credit"] if best else 0.0,
+                "accepted_current": best["accepted_current"] if best else False,
                 "matches_main_selection": best["matches_main_selection"] if best else None,
                 "main_input_differences": best["main_input_differences"] if best else [],
-                "credit_calculation_version": credit["calculation_version"] if credit else None,
+                "credit_calculation_version": best["calculation_version"] if best else None,
                 "review_status": best["review_status"] if best else None,
-                "uncredited_reason": best["uncredited_reason"] if best else None,
                 "available_as_input": field in numeric_options, "routes": routes,
                 "ready_to_calculate": ready, "ready_to_recalculate": status == "calculated_needs_updating" and ready,
                 "result_alternatives": candidates})
-            if (best and credit and credit["points"] > 0
-                    and best["calculation_version"] != credit["calculation_version"]):
-                steps[-1]["credit_basis"] = (
-                    f"{credit['points']:g} credit is retained from previously accepted work "
-                    f"in {credit['parameterization']!r}; it was not earned by the displayed calculation.")
     return {"steps": steps,
         **{status: sum(row["status"] == status for row in steps)
            for status in ("not_calculated", "calculated_up_to_date", "calculated_needs_updating")},
@@ -484,12 +465,13 @@ def calculation_step_status(result, outputs, *, subjects=None):
             "current_result": CURRENT_RESULT_CREDIT,
             "completion_floor": COMPLETION_CREDIT,
             "requested_output_multiplier": REQUESTED_OUTPUT_MULTIPLIER,
+            "support_bonus_threshold": SUPPORT_CREDIT_BASELINE,
             "requested_output_rates": {
                 "reusable_completion": REQUESTED_OUTPUT_MULTIPLIER * REUSABLE_METHOD_CREDIT,
                 "current_result": REQUESTED_OUTPUT_MULTIPLIER * CURRENT_RESULT_CREDIT,
                 "completion_floor": REQUESTED_OUTPUT_MULTIPLIER * COMPLETION_CREDIT,
-                "fully_supported": REQUESTED_OUTPUT_MULTIPLIER},
+                "fully_supported": REQUESTED_OUTPUT_MULTIPLIER * (COMPLETION_CREDIT + 1 - SUPPORT_CREDIT_BASELINE)},
             "requested_output": (
-                f"{REQUESTED_OUTPUT_MULTIPLIER:g} * max({COMPLETION_CREDIT:g}, current support); "
-                "support bonus is withdrawn when stale"),
-            "meaning": "Base rates apply to intermediate steps. The requested-output multiplier applies to all endpoint credit components, including retained method credit when stale. A stale formerly successful, accepted calculation retains reusable method work only. Enumeration, failed execution, and rejected or incomplete model review earn no credit. Alternative recipes are not a mandatory sequence."}}
+                f"{REQUESTED_OUTPUT_MULTIPLIER:g} * ({COMPLETION_CREDIT:g} + max(0, current support - {SUPPORT_CREDIT_BASELINE:g})) for current completed arithmetic; "
+                "current-result credit and support bonus are withdrawn when stale"),
+            "meaning": "Calculation credit follows the three numerical statuses: not_calculated has no method or current-result credit; calculated_up_to_date has both; calculated_needs_updating retains method credit and withdraws current-result and support credit until recalculation. Base rates apply to intermediate steps and the requested-output multiplier applies to every endpoint credit component. Scientific support review only qualifies the support bonus and never vetoes method or current-result credit. Changed inputs, provenance, or output contracts affect freshness without erasing completed method work. accepted_current reports scientific support qualification; status reports numerical freshness. Alternative recipes are not a mandatory sequence."}}

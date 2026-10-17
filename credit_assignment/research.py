@@ -34,12 +34,15 @@ class ResearchState:
 class ResearchController:
     """Deduplicate at this scope, never add up children's accumulated credit."""
 
-    def __init__(self, columns, *, window=4, capacity=2, epoch="research-v2", initial=None, groups=None,
+    def __init__(self, columns, *, window=4, root_window=None, capacity=2, epoch="research-v2", initial=None, groups=None,
                  sum_qualities=False, point_scores=False):
         self.columns = tuple(dict.fromkeys(columns))
         if not self.columns or window < 2 or capacity < 1:
             raise ValueError("Research control requires columns, window >= 2 and positive capacity")
+        if root_window is not None and (type(root_window) is not int or root_window < 2):
+            raise ValueError("Root yield window must be an integer >= 2")
         self.window, self.capacity, self.epoch = window, capacity, epoch
+        self.root_window = window if root_window is None else root_window
         self.sum_qualities = sum_qualities
         self.point_scores = point_scores
         self.groups = groups or (self.columns,)
@@ -125,7 +128,7 @@ class ResearchController:
         verdict = cq_normalization_rarefaction(
             self.history[self.window_start:], max_score=self._maximum(),
             score_resolution=resolution,
-            window_size=self.window,
+            window_size=self.root_window if is_root else self.window,
         )
         self.rarefaction = verdict.as_record()
         self.stop = verdict.should_yield
@@ -154,5 +157,5 @@ class ResearchController:
         return self._score() - previous
 
     def transitioned(self, epoch):
-        return ResearchController(self.columns, window=self.window, capacity=self.capacity, epoch=epoch,
+        return ResearchController(self.columns, window=self.window, root_window=self.root_window, capacity=self.capacity, epoch=epoch,
                                   groups=self.groups, sum_qualities=self.sum_qualities, point_scores=self.point_scores)

@@ -44,19 +44,31 @@ existing reasonableness assessment reviews that same record in place. Reuse a co
 its claim, evidence and target scope are unchanged. Assessment failure preserves
 the value and its discovery credit, and conditional arithmetic can still execute.
 
-A completed, accepted current intermediate earns 0.125, comprising 0.025 retained
-work and 0.100 current-result credit. Requested final outputs receive twice the
-base credit: `2 * max(0.125, current support)`, with a 0.25 floor and up to 2 points
-with full support. Their method/current/support credit components use the same
-multiplier. A stale result loses current-result credit and the support bonus,
-retaining 0.05 for a requested output or 0.025 for an intermediate; recalculation
-restores the current contribution. Expose the scoring projection's numerical
+A completed current intermediate earns 12.5, comprising 2.5 retained
+work and 10 current-result credit. Requested final outputs receive twice the
+base credit: 25 points, comprising 5 retained work and 20 current-result credit.
+Found values still earn 1 point. The existing requested-output support bonus
+remains `2 * max(0, current support - 0.125)`, adding up to 1.75 points without
+changing completion credit. A stale result loses current-result credit and the support bonus,
+retaining 5 for a requested output or 2.5 for an intermediate; recalculation
+restores the current contribution. Scientific support reviews cannot veto method
+or current-result credit; support qualification affects the support bonus.
+The table's numerical status and completion credit use the same arithmetic,
+output-contract and dependency checks. Expose the scoring projection's numerical
 `credit_policy` in the existing episode decision input, including compact child
 views. Found-value credit is unchanged, and there is no separate task-completion
 bonus. The episode continues to choose calculation or investigation.
 Unchanged-claim evidence reviews do not require repeated arithmetic. All active
 ancestor scores update after a committed change, without adding synthetic yield
 observations. These scores do not establish scientific completion.
+
+The root uses a separate marginal-yield window, defaulting to 12 attempted root
+actions; child episodes retain a 4-action window. Configure these independently
+with `--root-yield-window` and `--yield-window`. The estimator still compares
+recent credit gains with its existing threshold. This gives the root more chances
+to make progress between gains, without treating an incomplete result as complete.
+Failed attempts still enter this history with zero gain; distinguishing provider
+failure from scientific saturation requires a separate correction.
 
 There is no passive `issues` collection. Failed operations record a failed
 structured diagnostic; rejected source rows are excluded. Invalid numerical

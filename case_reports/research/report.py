@@ -322,10 +322,10 @@ class ResearchReport(ClosedRecord):
                         "method": "Found-parameter learning and calculation-step progress are separate additive components, each with weight 1. "
                         "Retained physical defaults and calculated intermediates are excluded from values-to-find coverage. "
                          "Calculation rates and the requested-output multiplier are recorded in global_scientific_goal.calculation_steps.credit_policy. "
-                         "Accepted current intermediates earn the base completion floor. Requested outputs multiply the greater of that floor "
-                         "and current support, including each method/current/support credit component. When dependencies become stale, "
+                         "Current completed intermediates earn the base completion floor independently of scientific support review. Requested outputs receive the requested-output multiplier "
+                         "on method and current-result credit, plus the separately graded support bonus. When dependencies become stale, "
                          "only the applicable method credit remains; recalculation restores current-result credit. Rejected or incomplete "
-                         "model reviews earn no calculation credit. Enumeration, unsuccessful calls and repetition earn no gain. "
+                         "support reviews do not remove method or current-result credit. Enumeration, unsuccessful calls and repetition earn no gain. "
                         "Intermediate steps retain their own dependencies and are optional routes, not additional requested conclusions. "
                         "Found-parameter learning retains its evidence scoring independently of calculation validity. "
                         "Completion requires supported requested outputs and calibration lineage in a coherent parameterization. "
@@ -405,18 +405,18 @@ class ResearchReport(ClosedRecord):
             endpoint_rates = policy.get("requested_output_rates")
             if endpoint_rates:
                 lines.extend([
-                    f"Requested-output credit: {endpoint_rates['completion_floor']:g} for an accepted current result, "
+                    f"Requested-output credit: {endpoint_rates['completion_floor']:g} for a completed current result, "
                     f"up to {endpoint_rates['fully_supported']:g} with full support; "
                     f"{endpoint_rates['reusable_completion']:g} remains when it needs updating. "
-                    f"Intermediate credit: {policy['completion_floor']:g} when accepted and current; "
-                    f"{policy['reusable_completion']:g} remains when stale. Rejected or incomplete reviews earn zero.", ""])
+                    f"Intermediate credit: {policy['completion_floor']:g} when completed and current; "
+                    f"{policy['reusable_completion']:g} remains when stale. Scientific support reviews do not veto completion credit.", ""])
             status_labels = {"not_calculated": "not calculated",
                 "calculated_up_to_date": "calculated & up to date",
                 "calculated_needs_updating": "calculated needs updating"}
             lines.extend(["## Calculation Progress", "",
                 f"Found-parameter credit: {scores.get('found_parameters', 0):.3f}. "
                 f"Calculation-step credit: {scores.get('calculation_steps', 0):.3f}.", "",
-                "Accepted calculations earn credit under the recorded policy. A stale result retains its method credit for prior completed work; "
+                "Completed calculations earn credit under the recorded policy independently of scientific support review. A stale result retains its method credit for prior completed work; "
                 "its current-result credit returns after recalculation. Ready means inputs are available for an explicit choice.", "",
                 "| Target scenario | Calculation | Kind | Computed value | Units | Status | Credit | Ready | Changed inputs / reason |",
                 "| --- | --- | --- | ---: | --- | --- | ---: | --- | --- |"])
@@ -426,10 +426,6 @@ class ResearchReport(ClosedRecord):
                     changes = list(dict.fromkeys(change.get("field") or change["reason"]
                         for alternative in step.get("result_alternatives", ())
                         for change in alternative.get("changed_dependencies", ())))
-                if step.get("uncredited_reason"):
-                    changes.append(step["uncredited_reason"])
-                if step.get("credit_basis"):
-                    changes.append(step["credit_basis"])
                 for difference in step.get("main_input_differences", ()):
                     changes.append(
                         f"{difference['field']}: calculation used "

@@ -248,7 +248,12 @@ empirical support or supported-output credit.
 
 `--search-limit` bounds the result set for each query. There is no model-call,
 whole-run unit, or per-episode unit budget. `--yield-window` configures numerical
-marginal-yield stopping.
+marginal-yield stopping for child episodes (default: 4 observations);
+`--root-yield-window` configures the root independently (default: 12).
+An observation is an attempted action at that episode, not a model call: a root
+investigation can contain many child actions. The longer root window allows more
+attempts between credit gains; it does not guarantee completion. Existing
+checkpoints without the root setting retain their saved shared-window semantics.
 `--text-window-chars` bounds individual reading executions, not document length.
 
 Exit codes: `0` when every required quantity has a coherent supported conditional

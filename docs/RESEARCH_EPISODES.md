@@ -102,10 +102,10 @@ The new default metric names are `allowable_room_time_s`, `safe_distance_m`,
 `scenario_reproductive_number`, and their `transient_` counterparts. Legacy
 background-only metrics and duration relationships remain available but do not
 satisfy these contracts. Requested-output credit is twice the underlying
-calculation credit: a current accepted output earns at least 0.25 points and up
-to 2 points with full support. Stronger support replaces the floor; repeats earn
-no gain. Intermediate calculation rates, the assumption rubric and the numerical
-controller are unchanged. The credit change has not been verified in a live run.
+calculation credit: a completed current output earns 25 points, with up to 1.75
+additional points for scientific support. A current intermediate earns 12.5;
+a found value earns 1. Repeats earn no gain. The assumption rubric is unchanged.
+These revised rates have not been verified in a new live run.
 
 ```text
 parent goal + parent-owned information contract
@@ -126,6 +126,18 @@ realized gain; it cannot bypass the estimator. Its failure flag, count and
 diagnostics remain separate from scientific conclusions. The rolling
 marginal-yield rule is an operational saturation heuristic, not a confidence
 interval or evidence that unanswered scientific questions are resolved.
+
+The root has an independent rolling window of 12 attempted root actions by
+default; children retain 4. `--root-yield-window` and `--yield-window` configure
+them separately. These are episode action observations, not model-call counts.
+An investigation returning to the root contributes one observation there even
+when it contains many nested actions. The gain threshold and estimator formula
+are unchanged. This makes the root more patient between credit gains, but still
+allows it to stop with unfinished targets. Provider failures also enter the
+window, so distinguishing those failures from scientific saturation remains
+unresolved. Old checkpoints without a root-window input retain their original
+shared-window behavior; adding this setting does not waive code-identity or
+reconstruction checks.
 
 Parents specify the child's scientific goal and information contract, not a
 model-call allocation. The post-V16 change removes `child_model_calls`, local
@@ -472,19 +484,22 @@ zero and does not change previous credit; repeated reviews or alternative
 wordings do not accumulate additional contributions for the same requirement.
 Genuine corrections can still decrease a contribution and reset the yield window.
 
-Requested outputs have a credit multiplier of 2. A current accepted output earns
-`2 * max(0.125, current_support)`: a 0.25-point floor or up to 2 points with full
-support. The floor comprises 0.05 points for completed method work and 0.20 for
-the current result. Support above the floor contributes the remaining points;
-it does not add another floor. When dependencies become stale, only the 0.05
+Requested outputs have a credit multiplier of 2. A completed current output earns
+25 points: 5 points for completed method work and 20 for the current result.
+The existing support bonus remains `2 * max(0, current_support - 0.125)`,
+adding up to 1.75 points. When dependencies become stale, only the 5-point
 method credit remains until recalculation restores current-result credit.
 
-Intermediate calculations keep their existing rates: 0.125 points for a current
-accepted result, comprising 0.025 method credit and 0.100 current-result credit;
-only 0.025 remains when stale. Found-parameter credit is unchanged. The global
+Intermediate calculations earn 12.5 points for a current
+completed result, comprising 2.5 method credit and 10 current-result credit;
+only 2.5 remains when stale. Found-parameter credit remains 1 point per independent value. The global
 score adds found-parameter and calculation-step points with weight 1 for each;
 there is no separate task-completion bonus. Evidence support retains its 0–1
-scale: the multiplier changes credit points, not evidence judgments.
+scale: the multiplier changes credit points, not evidence judgments. Rejected or
+incomplete scientific support reviews cannot veto method or current-result credit.
+Numerical status and completion credit use the same arithmetic, output-contract
+and dependency checks. `accepted_current` describes scientific support qualification;
+it does not determine completion credit.
 
 The full and compact parent decision views expose this policy using the same
 calculation projection that supplies global credit. Credit and the calculation

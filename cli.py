@@ -55,18 +55,27 @@ def main(
                     fork_from=args.fork_checkpoint, through_record=args.fork_through_record,
                     allowed_changes=args.fork_allow_changed, fork_reason=args.fork_reason))
             saved = checkpoint.inputs if checkpoint is not None else {}
+            legacy_root_window = checkpoint is not None and "root_yield_window" not in saved
+            root_window_default = (saved.get("yield_window", ResearchLimits().yield_window)
+                                   if legacy_root_window else ResearchLimits().root_yield_window)
             for name, default in (("disease", None), ("scenario", "bazant-bush"), ("search_limit", 10),
                                   ("text_window_chars", ResearchLimits().text_window_chars),
-                                  ("yield_window", ResearchLimits().yield_window), ("metric", None)):
+                                  ("yield_window", ResearchLimits().yield_window),
+                                  ("root_yield_window", root_window_default), ("metric", None)):
                 if getattr(args, name) is None:
                     setattr(args, name, saved.get(name, default))
+            if legacy_root_window and args.root_yield_window != root_window_default:
+                raise CheckpointError("This checkpoint used the same yield window for root and children; changing the root window requires a new run")
             if not args.disease:
                 raise ProviderConfigurationError("Supply the disease of interest; no disease is built in")
             request = Path(args.request_file).read_text() if args.request_file else saved.get("research_request", "")
             if Path(args.scenario).is_file():
                 args.scenario = str(Path(args.scenario).resolve())
             inputs = {name: getattr(args, name) for name in (
-                "disease", "scenario", "search_limit", "text_window_chars", "yield_window", "metric")}
+                "disease", "scenario", "search_limit", "text_window_chars", "yield_window", "root_yield_window", "metric")}
+            if legacy_root_window:
+                # Preserve old saved inputs and their original root-window semantics.
+                del inputs["root_yield_window"]
             inputs.update(research_request=request,
                           scenario_definitions=[case.as_record() for case in load_scenarios(args.scenario)])
             if checkpoint is None:
@@ -80,7 +89,7 @@ def main(
             print(f"Checkpoint: {checkpoint.path}" + (f"; reconstructing {checkpoint.replay_count} saved frames" if args.resume or args.fork_checkpoint else ""),
                   file=err, flush=True)
             limits = ResearchLimits(**{name: getattr(args, name) for name in (
-                "text_window_chars", "yield_window")})
+                "text_window_chars", "yield_window", "root_yield_window")})
             trace_path = Path(args.trace_path) if args.trace_path else checkpoint.path / "trace.jsonl"
             audit_path = Path(args.audit_path) if args.audit_path else checkpoint.path / "audit.json"
             report_path = Path(args.report_path) if args.report_path else checkpoint.path / "report.json"
@@ -233,8 +242,11 @@ def _parser() -> argparse.ArgumentParser:
     from .task_executors.scenario_metrics.evaluate import DEFAULT_METRICS
     from .case_reports.research import ResearchLimits
     parser.add_argument("--metric", action="append", choices=DEFAULT_METRICS, help=argparse.SUPPRESS)
-    for name in ("text_window_chars", "yield_window"):
-        parser.add_argument("--" + name.replace("_", "-"), type=int)
+    parser.add_argument("--text-window-chars", type=int)
+    parser.add_argument("--yield-window", type=int,
+                        help="Marginal-yield window for child episodes (default: 4).")
+    parser.add_argument("--root-yield-window", type=int,
+                        help="Marginal-yield window for the root episode (default: 12).")
     parser.add_argument("--checkpoint-path", help="New durable checkpoint directory (default: a unique directory under .artifacts/checkpoints).")
     parser.add_argument("--resume", metavar="CHECKPOINT", help="Continue this exact interrupted run by verified local reconstruction; saved provider responses are not requested again.")
     parser.add_argument("--fork-checkpoint", metavar="CHECKPOINT", help="Create an explicitly admitted changed-code experiment from an immutable saved unit prefix; not ordinary resume.")

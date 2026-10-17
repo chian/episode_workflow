@@ -45,12 +45,13 @@ class ResearchLimits:
     search_limit: int = 8
     text_window_chars: int = 12000
     yield_window: int = 4
+    root_yield_window: int = 12
 
     def __post_init__(self):
         for name, value in vars(self).items():
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        if self.yield_window < 2 or self.search_limit > 100 or self.text_window_chars < 100:
+        if min(self.yield_window, self.root_yield_window) < 2 or self.search_limit > 100 or self.text_window_chars < 100:
             raise ValueError("Invalid research control limits")
 
 
@@ -168,11 +169,6 @@ def calculation_decision_view(status, *, detailed, target_subjects=()):
                     "current_selected_unit": unit(change.get("current_selected_unit"), field)})
             add_note({"code": "main_input_changed", "inputs": differences})
         review = enum(step.get("review_status"), {"accepted", "rejected", "incomplete"})
-        if step.get("uncredited_reason"):
-            add_note({"code": {"rejected": "model_review_rejected", "incomplete": "model_review_incomplete"}
-                      .get(review, "calculation_credit_not_earned"), "review_status": review})
-        if step.get("credit_basis"):
-            add_note({"code": "credit_retained_from_prior_calculation"})
         if step.get("status") == "calculated_needs_updating":
             for alternative in step.get("result_alternatives", ()):
                 for change in alternative.get("changed_dependencies", ()):
@@ -341,6 +337,7 @@ class ResearchRun:
     def controller(self, path):
         focus, initial, scientific, outputs = self.controller_specs[path[-1][1]]
         controller = ResearchController((GLOBAL_GOAL_PROGRESS,), window=self.limits.yield_window,
+                                        root_window=self.limits.root_yield_window,
                                         initial=initial, point_scores=True)
         self.live_controllers[path] = controller
         return controller
