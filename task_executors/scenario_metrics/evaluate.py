@@ -265,14 +265,6 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
                 if operation == "solve_distance":
                     row["distance_outcome"] = ("no_finite_separation" if not math.isfinite(answer) else
                                                "no_positive_minimum" if answer == 0 else "finite_boundary")
-                    if near_field == "jet" and 0 < answer < 0.1:
-                        row.update(value=None, limit=None)
-                        return exclude("The algebraic boundary is below the 0.1 m jet domain.",
-                                       {field: args[field] for field in inputs})
-            if m.regime == "jet" and name in {"critical_distance_m", "risk_threshold_distance_m"} and 0 < answer < 0.1:
-                row.update(value=None, limit=None)
-                return exclude("The inferred distance lies below the 0.1 m jet domain.",
-                               {field: args[field] for field in inputs})
             values[name] = answer
             dependencies[name] = metric_dependencies[name]
             # Preserve computed canonical intermediates for reuse and dependency

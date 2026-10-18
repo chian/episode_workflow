@@ -104,9 +104,6 @@ class Metric:
         if self.regime == "clean_start_interpolation":
             constraints.append({"field": "initial_concentration_quanta_m3", "operator": "equal", "value": 0,
                 "reason": "The interpolation assumes a clean start"})
-        if jet and "neighbor_distance_m" in self.inputs:
-            constraints.append({"field": "neighbor_distance_m", "operator": "minimum", "value": 0.1,
-                "reason": "Jet far-field approximation is not valid this close to the mouth"})
         return constraints
 
 
@@ -205,7 +202,7 @@ def _exposure_metric(name, near_field):
         "not a bounded finite-population case count. "
         + ("J=0 only under an explicit negligible-near-field hypothesis. Zero distance means no positive "
            "minimum in this approximation, not safety at contact. " if near_field == "uniform" else
-           "Unmasked continuous-jet approximation; distances below 0.1 m are outside its domain. ")
+           "Unmasked continuous-jet approximation. ")
         + ("Transient B(t) uses the exact constant-source concentration integral. "
            + ("The additive, immediately established local jet is a separate quasi-steady approximation, "
               "not a transient-jet solution reported by the paper." if near_field == "jet" else "")

@@ -62,8 +62,6 @@ class ExposureModel:
     def risk(self, time_s, distance_m):
         time_s = non_negative(time_s, "exposure_time_s")
         distance_m = positive(distance_m, "neighbor_distance_m")
-        if self.near_field == "jet" and distance_m < 0.1:
-            raise ValueError("The jet approximation is outside its near-mouth domain below 0.1 m")
         return self.background_risk(time_s) + self.local_coefficient * time_s / distance_m
 
 
