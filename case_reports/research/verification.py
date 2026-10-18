@@ -11,6 +11,7 @@ OUTBREAK_OPERATORS = {"cq_from_steady_outbreak", "cq_from_transient_outbreak"}
 
 def provenance_index(result):
     records = {f.key: f.as_record() for f in result.facts}
+    records.update((identity(row), row) for row in result.evidence)
     for calculation in result.calculations:
         records.update((identity(row), row) for row in calculation.get("input_records", ()))
     for assessment in result.assumptions:
@@ -21,6 +22,7 @@ def provenance_index(result):
         records[assessment["key"]] = {**assessment, "kind": "model_assumption",
             "parents": list(dict.fromkeys([
                 *assessment.get("derivation", {}).get("input_fact_keys", ()),
+                *assessment.get("derivation", {}).get("source_evidence_ids", ()),
                 *(identity(row) for row in evidence.values()),
             ]))}
     return records

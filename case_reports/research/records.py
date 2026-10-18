@@ -63,17 +63,20 @@ def condensed_diagnostics(diagnostics):
 
 
 def cited_assessment_evidence(assessment):
-    """Distinguish the judgment's cited basis from all material it considered."""
-    references = {key for criterion in assessment["review"]["criteria"].values()
-                  for key in criterion["evidence"]}
-    references.update(assessment["review"].get("supporting_evidence", ()))
-    references.update(assessment["review"].get("contradicting_evidence", ()))
+    """Retain explicit inference provenance and any historical review citations."""
+    review = assessment.get("review", {})
+    references = {key for criterion in review.get("criteria", {}).values()
+                  for key in criterion.get("evidence", ())}
+    references.update(review.get("supporting_evidence", ()))
+    references.update(review.get("contradicting_evidence", ()))
     references.update(row["evidence_ref"] if isinstance(row, dict) else row
-                      for row in assessment["review"].get("invalid_evidence", ()))
-    constraint = assessment["review"].get("request_constraint")
+                      for row in review.get("invalid_evidence", ()))
+    constraint = review.get("request_constraint")
     if constraint is not None:
         references.update(constraint["evidence"])
-    return {key: item for key, item in assessment["evidence"].items() if key in references}
+    source_ids = set(assessment.get("derivation", {}).get("source_evidence_ids", ()))
+    return {key: item for key, item in assessment.get("evidence", {}).items()
+            if key in references or identity(item) in source_ids}
 
 
 def target_value_model_view(row, *, decision_view=False, target_subjects=()):

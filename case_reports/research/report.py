@@ -157,7 +157,7 @@ def scientific_progress(result, metrics, *, decision_view=False):
                     previous = {a["key"]: a for a in alternative.get("assumption_support", [])}
                     for key in dependency.get("assumption_versions", {}):
                         current = assessments.get(key)
-                        if not assumption_matches(dependency, key, current) or current.get("review", {}).get("verdict") == "contradicted":
+                        if not assumption_matches(dependency, key, current):
                             if decision_view:
                                 before = previous.get(key, {})
                                 typed = assumption_rows.get(key)
@@ -188,13 +188,13 @@ def scientific_progress(result, metrics, *, decision_view=False):
                                     "Establish the intended physical claim before relying on or recalculating this result.")})
                 for key in dependency.get("assumption_versions", {}):
                     assumption = assessments.get(key)
-                    if assumption and assumption["reasonableness"] < 1:
+                    if assumption and assumption.get("review") and assumption["reasonableness"] < 1:
                         if decision_view:
                             need = needs.setdefault(key, dict(assumption_rows[key]))
                         else:
                             need = needs.setdefault(key, {k: assumption[k] for k in
                                 ("subject", "field", "value", "statement", "reasonableness")})
-                            need["reason"] = assumption["review"]["explanation"]
+                            need["reason"] = assumption["review"].get("explanation", "")
                         affected = need.setdefault("affected_quantities", [])
                         if metric not in affected:
                             affected.append(metric)
@@ -494,14 +494,16 @@ class ResearchReport(ClosedRecord):
                     values = "; ".join(f"{row['label']}: {quantity(row)}" for row in comparison["alternatives"])
                     lines.append(f"- {name}: {values}")
                 lines.append("")
-        lines.extend(["## Assumption Support", "", "Ordinal review judgments, not probabilities or independent validation.", ""])
+        lines.extend(["## Parameter Records", ""])
         for assumption in self.data["assumption_assessments"]:
-            review = assumption["review"]
+            review = assumption.get("review", {})
             lines.extend([f"### {assumption['subject']}: {assumption['field']}", "",
-                          assumption["statement"], "", f"Assessment: {review['verdict']}. {review['explanation']}", ""])
-            lines.extend(f"- {name} ({row['grade']}/2): {row['reason']}" for name, row in review["criteria"].items())
+                          assumption["statement"], "", assumption["basis"], ""])
+            if review:
+                lines.extend([f"Recorded assessment: {review.get('verdict', '')}. {review.get('explanation', '')}", ""])
+            lines.extend(f"- {name} ({row['grade']}/2): {row['reason']}" for name, row in review.get("criteria", {}).items())
             for name in ("limitations", "alternatives", "missing_evidence"):
-                lines.extend(f"- {name}: {item}" for item in review[name])
+                lines.extend(f"- {name}: {item}" for item in review.get(name, ()))
             for evidence in cited_assessment_evidence(assumption).values():
                 source = evidence["source"]
                 citation = "Original request" if source == "request" else f"[Source]({source})"
