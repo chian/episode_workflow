@@ -15,7 +15,7 @@ from ..method_loop import (
     ReportContract, SourceEnd,
 )
 from ..method_loop.communication import ParentModelInputError
-from .research.assumptions import RUBRIC, assess_assumption
+from .research.assumptions import RUBRIC, register_candidate
 from .research.progress import ADDITIONAL_SUPPORT, parameter_support
 from .research.records import Credit, Ledger, ResearchMessage, ResearchResult
 from ..task_executors.scenario_metrics.evaluate import CONDITIONS, UNITS
@@ -367,6 +367,6 @@ class AssessmentSource(AssumptionSource):
     def propose(self, view):
         if view.units_consumed:
             return None
-        return self.leaf(lambda: assess_assumption(
-            self.branch.agent, self.proposal, self.ledger, self.branch.context,
-        ), "assess_assumption_reasonableness")
+        return self.leaf(lambda: register_candidate(
+            self.proposal, self.ledger,
+        ), "register_parameter")

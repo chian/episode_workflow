@@ -654,9 +654,6 @@ class ResearchSource:
         """Validate/register records before the shared candidate pipeline."""
         return result
 
-    def review_registered_candidates(self, result):
-        """Optional scientific support review after common candidate selection."""
-        return result
 
     def project(self, result):
         self.pending = self.assess(result)
@@ -676,17 +673,8 @@ class ResearchSource:
             # it does not discard it or postpone its target-value projection.
             working.merge(self.failure_result(exc, "source_value_relevance"))
         working.merge(project_source_target_values(working, candidates=candidates))
-        before_review = working.result(evaluated=self.pending.evaluated,
-                                       stop_reason=self.pending.stop_reason)
-        reviewed = self.review_registered_candidates(before_review)
-        if reviewed != before_review:
-            working.merge(changed_records(reviewed, before_review))
-            # A review may identify a genuine source/provenance error.
-            # Reproject availability without a second JEV assessment or a
-            # support threshold for otherwise valid numeric candidates.
-            working.merge(project_source_target_values(working))
-        self.pending = working.result(evaluated=reviewed.evaluated,
-                                      stop_reason=reviewed.stop_reason)
+        self.pending = working.result(evaluated=self.pending.evaluated,
+                                      stop_reason=self.pending.stop_reason)
         self.pending = replace(self.pending, diagnostics=tuple(
             self.run.identify_diagnostic(d) for d in self.pending.diagnostics))
         self.pending_global = changed_records(self.pending, committed)

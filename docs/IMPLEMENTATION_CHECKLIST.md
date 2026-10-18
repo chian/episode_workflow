@@ -1,7 +1,14 @@
-# Approved Episode Tree Implementation
+# Historical Implementation Checklist
 
-Source specification: the user-approved tree attached on 2026-10-09.
-This checklist records completion evidence, not a substitute specification.
+This file is a historical implementation record, not a current specification or
+proof of user authorization. Its old checkmarks, review requirements, support
+criteria, exclusions, test results, and approval labels describe prior code.
+They must not be used to restore removed reviews or gates.
+
+The current instructions are in [CURRENT_GOAL.md](CURRENT_GOAL.md) and
+[RESEARCH_EPISODES.md](RESEARCH_EPISODES.md). Explicit user instructions override
+all historical entries below. Documentation cleanup does not verify the current
+implementation.
 
 Current acceptance is defined in [Current Goal](CURRENT_GOAL.md). Historical
 test counts and run summaries below describe their recorded implementations;
@@ -10,7 +17,7 @@ being run under the current instructions. V20 is still running, and a passing
 live run with all three quantities and outbreak-calibration provenance remains
 unverified. Static implementation checkmarks do not establish live acceptance.
 
-## Required End State
+## Historical Required End State
 
 - [x] Active runtime disease/scenario entry point uses one method_loop Context and this tree:
   evaluate_airborne_safety_guideline > investigate > strategy > search > page >

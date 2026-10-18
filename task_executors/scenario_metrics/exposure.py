@@ -81,8 +81,6 @@ def exposure_model(values, *, background, near_field):
                if background == "transient" else 0.0)
     local = 0.0
     if near_field == "jet":
-        if penetration != 1:
-            raise ValueError("The continuous-jet model requires unmasked emission and inhalation")
         concentration = non_negative(values["quanta_concentration_exhaled_m3"], "quanta_concentration_exhaled_m3")
         encounter = probability(values["plume_encounter_probability"], "plume_encounter_probability")
         area = positive(values["mouth_area_m2"], "mouth_area_m2")

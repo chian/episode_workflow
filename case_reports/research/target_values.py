@@ -28,7 +28,6 @@ def _source_value_lineage(ledger, fact, invalid, visiting=frozenset()):
 
         assumption = ledger.assumptions.get(fact.parents[0])
         if (assumption is None or assumption.get("source_candidate_unavailable")
-                or assumption.get("review", {}).get("verdict") == "contradicted"
                 or any(assumption.get(name) != getattr(fact, name) for name in ("field", "value", "unit"))):
             return None
         context = (assumption["statement"] if assumption["subject"] == fact.subject else
@@ -351,11 +350,7 @@ def project_source_target_values(ledger, *, candidates=None):
                          "using the recorded source value is an explicit transfer assumption.")
             basis = "Candidate transferred without changing quantity or unit. Source contexts: " + "; ".join(
                 dict.fromkeys(context for candidate in values for context in candidate["profile"]["contexts"]))
-            review = {"completed": False, "verdict": "unassessed", "criteria": {},
-                "request_constraint": None,
-                "explanation": "Automatic conditional source-value mapping; no independent target reasonableness judgment is claimed.",
-                "limitations": ["Source applicability is graded separately; the source value is not a target observation."],
-                "alternatives": [], "missing_evidence": []}
+            review = {}
             assumption = {"key": key, "subject": subject, "field": field, "value": value, "unit": unit,
                 "statement": statement, "basis": basis, "role": "inferred_assumption",
                 "entry_type": "source_candidate", "source_candidate_group": group["group_id"],
@@ -396,9 +391,7 @@ def project_source_target_values(ledger, *, candidates=None):
                 or key in current_keys
                 or previous.get("source_candidate_unavailable")):
             continue
-        revised = {**previous, "source_candidate_unavailable": True,
-            "review": {**previous["review"], "verdict": "contradicted",
-                "explanation": "The source value or its target parameter group is no longer current."}}
+        revised = {**previous, "source_candidate_unavailable": True}
         revised.pop("version", None)
         revised["version"] = identity(revised)
         deltas.append(revised)

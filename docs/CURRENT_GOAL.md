@@ -1,327 +1,167 @@
-# Current Goal
+# Current Goal and Implementation Boundaries
 
-Revised on 2026-10-13 at the user's request. This replaces the repository's
-paper-scenarios-only goal with the generalized goal below while preserving the
-agreed default scenarios, three-output contract, and episodic architecture.
-It specifies required behavior, not a claim that acceptance has been achieved.
+Updated 2026-10-18 to reflect the user's corrections. This document describes
+required behavior, not a claim that the implementation satisfies it. Repository
+prose and historical implementation notes do not establish user approval.
+Explicit user instructions take precedence.
 
-## Parameter And Calculation Planning (2026-10-15)
+## Do Not Expand the Requirements
 
-Before research, run the almost-universal-constants judge, then the shared-parameter
-judge, then initialize credit. The constants judge retains the configured gravity,
-air density, air viscosity and water-like particle density unless a concrete target
-scenario feature requires material variation. The default scenarios retain all four.
-Only promoted properties enter the shared-parameter judge's initial input list.
-Caller-supplied values take precedence. Retained defaults are automatically supplied
-model premises with provenance and receive no discovery credit.
-
-Track found parameters and calculation steps separately. The found denominator is
-the number of independent required values after sharing; it excludes retained
-defaults and the four calculated fields (quanta emission, settling speed, removal
-capacity and removal rate). Enumerate relevant executable calculation steps and
-alternative recipes without making them a mandatory sequence. Each step shows its
-status, actual dependencies, credit and readiness to run or rerun in existing
-episode inputs and reports.
-
-Every validated native source value automatically creates a conditional target
-alternative for each independent group needing that quantity. No additional
-investigation proposal or target reasonableness review is required to enter the
-main value table or receive discovery credit. Select the value with the highest
-source-scenario relevance for that specific value and parameter; preserve other
-values as alternatives. Unknown or zero relevance does not block finding a value.
-One independent group earns one discovery point, without multiplying credit for
-alternatives or shared target cases. Replacing the selected number invalidates
-dependent calculations; a relevance-only change to the same number does not.
-Target calculations read the current main table automatically. Calculation requests
-specify the scenario, operation, outputs and model conditions; they cannot supply
-numeric candidate references. Fixed scenario values and retained constants are
-supplied automatically, and reused computed inputs must be current. Competing
-candidate records remain available for inference and provenance, without forming
-a second target calculation input interface. Source calibration retains its own
-native source records. Readiness, execution and calculation credit must use the
-same main-table values. When a calculation uses an automatic source value, the
-existing reasonableness assessment reviews that same record in place. Reuse a completed assessment while
-its claim, evidence and target scope are unchanged. Assessment failure preserves
-the value and its discovery credit, and conditional arithmetic can still execute.
-
-A completed current intermediate earns 12.5, comprising 2.5 retained
-work and 10 current-result credit. Requested final outputs receive twice the
-base credit: 25 points, comprising 5 retained work and 20 current-result credit.
-Found values still earn 1 point. The existing requested-output support bonus
-remains `2 * max(0, current support - 0.125)`, adding up to 1.75 points without
-changing completion credit. A stale result loses current-result credit and the support bonus,
-retaining 5 for a requested output or 2.5 for an intermediate; recalculation
-restores the current contribution. Scientific support reviews cannot veto method
-or current-result credit; support qualification affects the support bonus.
-The table's numerical status and completion credit use the same arithmetic,
-output-contract and dependency checks. Expose the scoring projection's numerical
-`credit_policy` in the existing episode decision input, including compact child
-views. Found-value credit is unchanged, and there is no separate task-completion
-bonus. The episode continues to choose calculation or investigation.
-Unchanged-claim evidence reviews do not require repeated arithmetic. All active
-ancestor scores update after a committed change, without adding synthetic yield
-observations. These scores do not establish scientific completion.
-
-The root uses a separate marginal-yield window, defaulting to 12 attempted root
-actions; child episodes retain a 4-action window. Configure these independently
-with `--root-yield-window` and `--yield-window`. The estimator still compares
-recent credit gains with its existing threshold. This gives the root more chances
-to make progress between gains, without treating an incomplete result as complete.
-Failed attempts still enter this history with zero gain; distinguishing provider
-failure from scientific saturation requires a separate correction.
-
-There is no passive `issues` collection. Failed operations record a failed
-structured diagnostic; rejected source rows are excluded. Invalid numerical
-inputs abort that calculation before publishing results. Each requested quantity
-records whether it was calculated, lacked inputs, or was outside the model's
-domain. Evidence support remains a separate assessment and does not gate found
-values or otherwise executable conditional arithmetic. Reused calculations carry
-only the dependencies of the reused output, including the original sharing-scope
-and claim records. Evidence-review metadata changes alone do not invalidate them.
+- Do not add scientific-support, reasonableness, applicability, or calculation
+  approval reviews without an explicit user instruction. Calling a mechanism
+  "mandatory" in code or documentation does not authorize it.
+- Do not infer new requirements from words such as scientific, justified,
+  supported, safe, or validated. Report provenance and uncertainty using the
+  existing records; those words do not authorize another judge or acceptance gate.
+- Keep the explicitly requested constants planning, parameter sharing, and
+  value-specific source-to-target relevance assessment. They have distinct jobs;
+  they do not authorize additional scientific approval mechanisms.
+- Preserve source transcription checks: the number, quantity, units, attribution,
+  and quoted source span must describe what was retrieved. Checking a copied
+  record does not authorize judging whether a scenario may use its value.
+- No unapproved gates, scientific cutoffs, confidence thresholds, consistency
+  tolerances, or extra stopping rules. If an equation or setting appears wrong,
+  show the exact code and explain the uncertainty to the user before changing it.
+- Separate verified code behavior, observed run behavior, and hypotheses. A
+  hypothetical failure is not evidence of a remaining defect. Do not claim that
+  a mechanism occurred in a run without tracing that run.
 
 ## Objective
 
-Build one generalized, executable episodic workflow for airborne-disease safety
-estimation, with one root named `evaluate_airborne_safety_guideline`.
+Build the generalized episodic system for the runtime disease and scenarios
+selected through `--scenario`. It acquires values through the existing real
+search, retrieval, and extraction path and computes:
 
-The workflow starts from runtime inputs including `disease_name`, a target
-scenario or scenario set, and optional setting hints. It acquires evidence itself
-through the repo-local, copied nano-graphrag search/retrieve episode path, using
-real Firecrawl search/retrieval and real LLM extraction through a configured
-provider. The current live run uses the Codex CLI ChatGPT login; the local
-Argo shim remains an option. It extracts structured quantities from retrieved text, validates exact
-source spans and source references, calibrates infectiousness/Cq from searched
-outbreak evidence, and evaluates the requested safety quantities with deterministic
-Bazant-Bush calculation tools. Child credit and structured return records inform their
-parents' continued decisions.
+1. Allowable room time at the scenario's reference separation.
+2. Risk-based safe distance at the scenario's reference duration.
+3. Indoor reproductive number, R_in, at both reference coordinates.
 
-Return only these three scientific quantities, with their conditions, evidence,
-uncertainty, and any structured failures:
+Compute steady and transient results under the scenario's declared settings.
+Do not substitute a concentration crossover, formula inventory, published-answer
+match, or planning report for the requested numerical outputs. Do not embed a
+particular disease, outbreak, source, or set of empirical answers in the system.
 
-1. Allowable time in the room: fix separation and solve duration under the stated
-   risk criterion.
-2. Risk-based safe distance: fix duration and solve minimum separation under that
-   same criterion. Do not substitute a jet/background concentration crossover.
-3. Indoor reproductive number, `R_in`: fix both duration and separation and
-   evaluate the model.
+## Scenario Ownership
 
-The workflow must be general across runtime disease and scenario inputs. Do not
-hard-code a disease, required paper, named outbreak, case fixture, benchmark, or
-pre-entered empirical evidence source. There is no comparison, answer-matching,
-or published-number target metric.
+- Scenario definitions own room, population, activity, ventilation, masks, risk
+  criterion, reference coordinates, and model settings. Calculations read those
+  settings; episode proposals cannot supply or override them.
+- Explicitly select `continuous_unmasked_jet` or `negligible_near_field` in each
+  scenario. The existing scenarios explicitly retain the former jet default.
+  Future scenarios can explicitly select the other setting. The calculator has
+  no implicit near-field default. This choice does not infer mask behavior.
+- `well_mixed` describes the background assumption; a well-mixed background can
+  coexist with a local jet. Do not conflate these settings.
+- Encode assumptions in the scenario's parameter values and model settings.
+  Descriptive condition statements are not evidence prerequisites for arithmetic.
+  Do not introduce a second approval process for a scenario-owned setting.
+- The existing reference coordinates are 1.8288 m and 900 s. Caller-selected
+  scenarios can override them. They are evaluation coordinates, not calculated
+  safety answers or defaults for an observed outbreak's duration.
+- Do not change equations or add multipliers merely because a setting appears
+  not to affect a particular term. Show the term and ask the user when its
+  intended role is unclear. In particular, do not add mask penetration to the
+  local jet term without authorization.
 
-## Scenario And Calculation Contract
+## Planning and Found Values
 
-- Keep `--scenario` flexible. Retain the existing eight Bazant-Bush scenario
-  definitions as the default selectable input set, not as the only cases the
-  workflow can evaluate. The default scenario definitions are coded once and
-  reused; the workflow does not rediscover or invent its target scenarios.
-- Fixed room, occupancy, activity, ventilation, mask, population, and risk
-  conditions belong to the selected scenario. Setting hints may guide evidence
-  acquisition, but do not authorize silently changing those conditions or
-  inventing replacement reference rooms.
-- Default reference inputs remain six feet (`neighbor_distance_m = 1.8288`) and
-  fifteen minutes (`exposure_time_s = 900`), from the agreed Bazant-Bush reference
-  choices. `solve_time` fixes separation; `solve_distance` fixes duration;
-  `evaluate_R_in` fixes both. These are evaluation inputs, not presumed safe
-  answers, event durations to invent, or empirical findings to rediscover.
-  Caller-selected scenarios can override them; omitted target reference inputs
-  use the declared defaults, not agent-selected values. These defaults must never
-  supply an outbreak's exposure duration.
-- Use the same risk model and parameterization for all three operations within
-  each background regime. Distinguish steady and initially clean-room results.
-  Retain the fixed inputs, solved variable, model identity, risk criterion, and
-  assumptions with each result. A formula without the requested evaluation is
-  not a completed scalar output.
-- A background-only calculation cannot substitute for a requested calculation
-  under a distance-dependent model. A negligible-near-field approximation must
-  be explicit and applied consistently to all three operations, not inferred
-  automatically from mask use. Record other model extensions and applicability
-  limitations explicitly.
-- Report a genuinely unbounded time, no finite separation, or no positive
-  distance bound distinctly from a missing calculation. Such outcomes are
-  conditional on the chosen model and criterion; they are not unconditional
-  safety claims. Do not replace a missing distance calculation with a different
-  metric or a time result.
-- Generality does not require silently applying an unsuitable model. Surface
-  missing physical assumptions and applicability limits, investigate them, and
-  report an explicit limitation where the requested calculation is not defined.
+Before searching, perform the almost-universal-constants planning, then the
+shared-parameter assessment, then form the initial list and credit assignment.
+Retain gravity, air density, viscosity, and water-like particle density unless
+the constants assessment identifies a scenario requiring material variation.
+The default scenarios retain those configured values. Only promoted properties
+enter the found-value list and sharing assessment; supplied constants earn no
+finding credit.
 
-## Runtime Evidence And Provenance
+Track independent required values after sharing. Exclude supplied scenario
+values, retained constants, and calculated quantities: quanta emission, settling
+speed, removal capacity, and removal rate. Do not inflate the denominator with
+alternative recipes, extra source scenarios, or calculation steps.
 
-- Search is an explicit child episode path wherever outbreak or assumption
-  evidence is needed. Use the copied nano-graphrag episode bindings, especially
-  the `SearchPageProposer` path, not a private search bypass.
-- Firecrawl calls use the repo-local copy of nano-graphrag's tested Firecrawl
-  client. LLM extraction can use the repo-local Argo shim with
-  `api_key="no-auth"`, or the repository-owned Codex Responses client with the
-  current Codex CLI ChatGPT access token. Codex owns token refresh.
-  Search-page selection passes Firecrawl candidates through the repository-owned
-  Jev relevance assessor before the model selects a page. No OpenAI-keyed workflow path, cross-repo imports, or runtime dependencies on
-  another checkout. Required code must live here or in the Python standard
-  library.
-- Research model calls declare FAST or REASONING tiers. Configure their model
-  identifiers per run; FAST uses no reasoning for Codex, while REASONING uses a
-  configured reasoning effort. Search-page and page-child selection and table-page
-  extraction match nano-graphrag's FAST call sites. Other scientific calls use
-  REASONING. Record the selected tier and model with each model attempt.
-- No fake providers or transports, synthetic evidence, hand-entered
-  `EvidenceSource` records, `PaperCaseReport` objects, benchmark outbreak records,
-  seeded source bodies, pre-extracted findings, or caller-supplied source records
-  into a parent. Default scenario definitions are inputs, not an evidence fixture
-  and not a required research source.
-- Admit empirical quantities only through the workflow's own runtime retrieval
-  and LLM extraction path. Validate the extracted units, exact quoted spans, and
-  references against the retrieved source. Do not use regex or hand-written text
-  extraction to obtain scientific facts; use structured JSON parsing and LLM
-  extraction, with deterministic exact-span validation.
-- Distinguish four kinds of numeric provenance: caller-owned scenario inputs and
-  declared mathematical/unit constants; span-checked empirical findings;
-  deterministic values derived from identified inputs; and explicitly proposed
-  provisional assumptions. Never relabel one kind as another. Scenario inputs
-  and constants receive no evidence-discovery credit.
-- Derived assumptions may use indirect evidence and explicit transformations.
-  A candidate guess may be calculated before it has supporting evidence, but
-  must retain its proposal origin, rationale, uncertainty, and unsupported status.
-  Seek direct or indirect numerical or qualitative evidence for its reasonableness.
-  Do not invent a source span for an inferred or guessed value.
-- Weak or missing assumption support must not gate otherwise defined provisional
-  calculations. Evidence affects confidence and credit. Stronger support can
-  improve an unchanged assumption; contradictory evidence can invalidate it.
-- A successful live run must actually calibrate Cq from outbreak quantities
-  admitted through runtime search, retrieval, extraction, and span validation.
-  Retain the outbreak setting, calibration assumptions, and transfer assumptions
-  linking that calibration to the target scenario. A guessed Cq may support an
-  explicitly provisional calculation, but does not satisfy this acceptance step.
+Automatically retain extracted values and populate the main table using the
+highest source-scenario relevance for that particular parameter value. Preserve
+alternatives as provenance. Low or unknown relevance does not gate availability
+or finding credit. Report the investigated target separately from the source
+scenario and expose their value-specific relationship assessment.
 
-## Episodes, Communication, And Credit
+An estimate may supply a needed value when direct reporting is unavailable.
+Record its origin and reasoning without labeling it as an extracted source
+number. Do not require a separate scientific-support approval to use it.
 
-- Preserve the approved `method_loop` ownership structure. Each episode is a
-  controlled agent loop with a goal, mandatory credit assessment, and numerical
-  continuation/stopping based on credit-yield history. Do not turn the tree into
-  a fixed sequence of stages or wrap each deterministic function in an episode.
-- Project admitted evidence, assessed hypotheses, and calculation results into
-  one shared scientific Goal state. Expose its target-route input coverage,
-  outbreak-calibration readiness, and completed outputs to the episode levels;
-  score new global progress above each episode's inherited baseline, including
-  the root. Track both executable route alternatives so progress on a jet input
-  is visible even when the uniform route currently has fewer missing inputs.
-  Score and report independent target values found, excluding fixed caller
-  givens, retained defaults and calculated quantities. Report scientific
-  assessment separately from whether a numeric value is available. Keep
-  source-local evidence credit and assumption review distinct from this
-  readiness projection. A route with available inputs is not thereby supported.
-- When a reading page, search, or evidence strategy obtains new scored parameter
-  evidence, return it to the next scientific owner for assessment. That owner
-  can request more evidence if the new source does not support its hypothesis.
-- Keep `calibrate_cq_from_outbreak` nested under the infectiousness path, not as
-  the root. Deterministic calibration and guideline calculations remain tools
-  available to their owning episodes.
-- The existing parent tools expose `solve_time`, `solve_distance`, and
-  `evaluate_R_in`. The parent can choose calculation tools or investigation
-  children and revisit assumptions and calculations as its information improves.
-  An investigation that owns recorded hypotheses may also call those reviewed
-  deterministic tools and return their results with its evidence. Source-reading
-  children only acquire evidence; they do not invent target hypotheses or run
-  calculations.
-  At each root decision, favor a newly executable provisional calculation over
-  another investigation; use its consequences to target the next uncertainty.
-  When a specific physical input is missing, request a focused hypothesis
-  proposal rather than a broad source survey before trying the calculation.
-  Inferred hypotheses receive mandatory reasonableness assessment; that review
-  qualifies their support and does not gate source-value discovery credit.
-  Search and document examination remain iterative episodes.
-- When a scientific episode chooses `investigate` or `evidence_strategy`, its
-  existing action JSON includes `calculation_deferrals` identifying the affected
-  requested-output rows by `subject` and `field`. Each record also contains a
-  defined `reason`, `related_fields`, a row-scoped `route_ref` or null, and
-  `error_refs`. The reasons are `missing_value`, `input_error`,
-  `unresolved_condition`, `model_constraint`, and `improving_evidence_support`.
-  An input-error suspicion can name its field before an error footnote exists.
-  Validate identifiers against the displayed decision snapshot; do not reject
-  an investigation because calculation is ready or adjudicate its priority.
-  Require at least one affected row when requested rows exist, otherwise `[]`.
-  Calculation actions and candidates-only inference omit this metadata. It is
-  retained in existing action records and does not change credit or readiness,
-  add a judge call, or add fields to the child-to-parent return contract.
-- Parents specify the information contract needed from each child. Returns are
-  formal JSON with declared terms and definitions: `parameter_results` contains
-  numbers, units, origin, status and declared references; `reviews` contains
-  verdict, completion and criterion grades; `calculations` contains output
-  statuses, values and units; `reading_coverage` contains counts; `operations`
-  contains closed stage/category/status terms and counts; `completion` contains
-  `ended_by` and `evaluated`. Existing work-call JSON and runtime records supply
-  these fields. There is no separate summary call, findings paragraph, direct
-  child prose message or free-form completion reason.
-- On failure, return the recorded operation category and status alongside valid
-  partial parameter, review and calculation records. Reading counts distinguish
-  unexamined material from examined material. Unvalidated content does not become
-  established evidence. The parent uses these structured outcomes for its next
-  decision; an operational stop does not establish scientific completion.
-- Roll sibling contributions up to parents without double-counting repeated
-  findings or calculations. Credit reflects goal-relevant partial progress,
-  usable provisional outputs, and stronger scientific support. Do not reward
-  filled fields, renamed parameterizations, raw source counts, or repetition.
-- Evidence that corroborates an unchanged assumption is cumulative support, not
-  an overwrite or something to ignore. Credit decreases should reflect actual
-  loss of previously valid progress, such as invalidated premises, not simply
-  another incomplete return. No cost term or cost-based steering is required.
-- At numerical stopping, return the best current three-quantity results for each
-  selected case, with explicit missing results and evidence status. There is no
-  model-call or unit budget; do not equate stopping or populated fields with
-  successful completion.
+## Calculations and Reuse
 
-## Acceptance And Failure Boundary
+- Target calculations bind values from the main table, supplied scenario inputs,
+  retained constants, and current computed results. No caller-selected numeric
+  alternatives or overrides. Source calibration uses its own native source records.
+- Keep one defined calculation for each computed quantity. Removal capacity uses
+  `Q + pf*Qr + lambda_v*V + vs*A`; do not restore the competing `lambda*V` recipe
+  or the 2% consistency comparison.
+- Reuse a current stored result unchanged. Copying a value must not change it.
+  Recalculate because an actual dependency changed, not because another operation
+  happened to run or an assessment's opinion changed.
+- A numerical function computes numbers from its operands. Its execution wrapper
+  records success or an actual error. Do not invent `inapplicable` results or
+  discard calculated numbers based on scientific judgment or an arbitrary cutoff.
+  Preserve genuine zero and unbounded mathematical results distinctly from missing work.
+- Do not put an LLM review between a calculation request and execution. Do not
+  silently return a correction as though the requested calculation executed.
+- Use one calculation table with computed value, units, dependencies, readiness,
+  credit, and three progress statuses: `not_calculated`,
+  `calculated_up_to_date`, `calculated_needs_updating`.
+- Readiness describes available operands for the scenario's selected calculation.
+  Numerical freshness and credit must use that same dependency state. A support
+  verdict alone cannot make an unchanged numerical result stale or unusable.
 
-- Verify through a real query across the production search/retrieve/LLM boundary.
-  The user's prohibition on running tests remains in force. Do not run test
-  suites, fake-provider exercises, or local calculation replays as a substitute.
-- A passing root run must show a real search, retrieval of real source text, real
-  LLM extraction, span/ref-checked admission, outbreak-based Cq calibration,
-  target-scenario calculations for all three quantities, and source references
-  and child/parent credit reports tracing the whole path.
-- Completion requires scientifically supported outputs with explicit assumptions
-  and applicability, not agreement with published answers. Unsupported partial
-  estimates remain useful reportable progress, not a completed source-backed
-  result. Internal arithmetic consistency alone is not independent scientific
-  validation.
-- If the real LLM/search/retrieval path is unavailable, fail closed with a
-  structured blocker. Do not substitute fixtures, local evidence, another
-  unauthorized provider, or a fabricated successful result. Preserve valid
-  partial results already acquired during that run and report them as partial.
-- Distinguish operational blockers, malformed contracts, evidence uncertainty,
-  and physical/model limitations. Missing evidence can motivate more research
-  or a provisional assumption; it must not become an execution gate on every
-  calculation. Failures must retain enough context to inform a subsequent decision.
+## Credit and Episode Decisions
 
-## Current State
+Keep found-value and calculation-step credit separate and visible. Retain the
+existing base policy: one point per independent found value; 12.5 per current
+intermediate (2.5 method plus 10 current result); 25 per current requested output
+(5 method plus 20 current result). Stale results retain method credit until
+updated. Distinct relevant evidence has its existing 0.1 increment.
 
-The user reports that Argo has reset as of 2026-10-13. The historical monthly
-access revocation is no longer treated as an outstanding blocker. V18 and V19
-made real model, search and retrieval calls with runtime disease input, but were
-terminated after source changes superseded their loaded implementations. They
-did not produce final reports or establish completion. V19's streamed attempts
-remain available. V20 is now the fresh real query of the revised implementation.
+This instruction correction does not change scoring weights. The historical
+support-bonus formula is not authorization to add or retain extra approval calls;
+its implementation and remaining review machinery require separate examination.
+Do not invent replacement scoring to resolve that mismatch.
 
-The historical V16 query produced unsupported partial estimates; it
-did not demonstrate the current three-operation contract. Subsequent edits add
-`solve_time`, `solve_distance`, and `evaluate_R_in` in
-`task_executors/scenario_metrics/exposure.py`, exposed by the existing parent
-tools, without adding episodes. The implemented model is
-`R(t,x) = B(t) + J*t/x`; its unmasked continuous-jet route and transient local
-plume approximation require explicit applicability assumptions. Its alternative
-negligible-near-field hypothesis sets J to zero consistently in all operations.
-Outputs retain fixed inputs and model identity; credit and coverage check the
-requested operation and supplied coordinates.
+Update the main table, calculation status, credit, and episode-visible records
+together. Active ancestor credit can update before a child returns. Relevance or
+review metadata alone must not retract numerical completion credit or trigger
+identical arithmetic again.
 
-The active query has not yet demonstrated the full calculation and support
-path. V25 ended incomplete after 665 model calls, with source acquisition but
-no outbreak calibration or requested calculations. V26 was launched on
-2026-10-14 with Codex CLI ChatGPT authentication replacing the local Argo shim.
-Its run-start source archive is retained under `.artifacts/live/`. This goal
-has not been achieved; see `RESPONSE_FAILURE_STUDY.md` for earlier observed behavior.
+The episode chooses whether to investigate or calculate. Explain available
+calculation credit so it can choose useful work. Do not force a sequence or claim
+that the next action is guaranteed. The yield estimator measures credit history;
+it does not compare alternative actions. Preserve the independently configured
+root and child windows (12 and 4 by default). Do not add stopping rules here.
 
-The user replaced the stored goal with this specification and activated it on
-2026-10-13. The live verification disease and variant are provided at runtime,
-not embedded in code or default scenarios. Report the three main quantities for
-each default scenario at the end of verification.
+## Communication and Operations
+
+- Preserve the existing `method_loop` ownership tree. Deterministic calculations
+  are tools, not additional episodes.
+- Parent returns are structured JSON with defined fields. No freeform findings
+  paragraph, direct child prose, or second summarization call. Gather needed
+  structured information in the existing work call.
+- Keep existing logs and records. Do not add an issues collection or another
+  progress log. Report values found, calculation status, and actual target progress.
+- Use the existing Firecrawl and Jev search path. Retain the Codex-login and Argo
+  provider options and the configured FAST/REASONING split.
+- Keep real source provenance and outbreak-calibration lineage. Do not fabricate
+  evidence, inject fixtures, or relabel guesses as observations. Do not turn
+  provenance reporting into a separate scientific-support approval requirement.
+- Report completion from actual requested results and their recorded inputs;
+  stopping alone does not establish completion. Do not add a requirement to win
+  an independent scientific-support verdict before results count as calculated.
+- The user's prohibition on tests, fake-provider exercises, and calculation
+  replays remains in force unless explicitly changed. Static checks and real
+  runs require the authorization applicable to those actions. Runs are currently
+  stopped; this document does not authorize restarting or pushing changes.
+
+## Implementation Status
+
+These requirements supersede conflicting historical descriptions. Remaining
+parameter-review, freshness, scoring, and reporting code has not all been aligned
+or verified. Documentation changes do not establish that those defects are fixed.
+Read historical trace studies as records of past implementations, not instructions
+to restore their behavior.

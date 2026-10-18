@@ -9,12 +9,12 @@ from ...task_executors.scenario_metrics.dependencies import input_fields
 from ...task_executors.scenario_metrics.evaluate import CONDITIONS, DEFAULT_METRICS, UNITS
 from .acquisition import StrategySource
 from .admission import extract_and_admit
-from .assumptions import (RUBRIC, assess_registered_candidates, assumption_candidate,
+from .assumptions import (assumption_candidate,
                           candidate_response_schema, frame_scenario, register_candidate, text)
 from .communication import decision_records
 from .engine import CONSISTENCY, ResearchLimits, ResearchProviders, ResearchRun, ResearchSource, selected_choice
 from .goal_state import GLOBAL_GOAL_PROGRESS
-from .modeling import DERIVATIONS, review_model
+from .modeling import DERIVATIONS
 from .model_defaults import MODEL_DEFAULTS, initialize_model_defaults
 from .records import Ledger, ResearchResult, identity, numeric_references
 from .report import ResearchReport, scientific_progress
@@ -83,89 +83,11 @@ def source_calculation_view(ledger, numeric_catalog=None):
 
 
 def calculation_leaf(source, proposal, staged, context):
-    """One reviewed deterministic-tool path for root and hypothesis owners."""
+    """Execute the deterministic tool without a calculation model review."""
     action = proposal["action"]
 
     def calculate():
-        from .assumptions import assess_selected_source_candidates, correct_input_records
-        from .records import numeric_provenance
-
-        if action == "compare_predictions_with_observations":
-            calculation_action = proposal
-            observation = proposal.get("observation")
-            if observation not in staged.options():
-                raise ValueError("Comparison requires an admitted observation option")
-            facts = (staged.options()[observation],)
-        else:
-            calculation_action, facts = resolve_calculation_inputs(proposal, staged, source.run.metrics)
-        source_input_keys = None
-        if calculation_action.get("source_inputs"):
-            references = numeric_references(staged)
-            source_input_keys = [references[ref].key for ref in calculation_action["source_inputs"]]
-        staged.merge(assess_selected_source_candidates(source.run.complete, staged, facts,
-            calculation_action.get("conditions", {}), calculation_action.get("subject"),
-            context, source.failure_result))
-        if action != "compare_predictions_with_observations":
-            if source_input_keys is not None:
-                # Review can persist an inferred operand and shift local labels.
-                # Preserve the source operands already chosen, not their positions.
-                references = {fact.key: ref for ref, fact in numeric_references(staged).items()}
-                calculation_action = {**calculation_action,
-                    "source_inputs": [references[key] for key in source_input_keys]}
-            calculation_action, facts = resolve_calculation_inputs(calculation_action, staged, source.run.metrics)
-        model_context = {**context, "calculation_options": tool_options(staged)}
-        # Preserve the provenance of the actual operands, including a contradicted
-        # assignment. The support reviewer needs that record to identify a repair.
-        evidence_by_id = {identity(row): row for row in staged.evidence_options().values()}
-        for assumption in staged.assumptions.values():
-            evidence_by_id.update((identity(row), row) for row in assumption.get("evidence", {}).values())
-        numeric = numeric_provenance(staged)
-        source_records, visited = {}, set()
-
-        def collect_sources(fact):
-            if fact.key in visited:
-                return
-            visited.add(fact.key)
-            if fact.kind in {"source_observation", "source_model_parameter"}:
-                row = fact.semantic_record()
-                source_records[identity(row)] = row
-            for parent in fact.parents:
-                assumption = staged.assumptions.get(parent)
-                if assumption is not None:
-                    derivation = assumption.get("derivation", {})
-                    for key in derivation.get("source_evidence_ids", ()):
-                        row = evidence_by_id.get(key)
-                        if row is not None and row.get("kind") in {
-                                "source_observation", "source_model_parameter", "source_evidence"}:
-                            source_records[key] = row
-                    for key in (*derivation.get("input_fact_keys", ()),
-                                *assumption.get("source_fact_keys", ())):
-                        if key in numeric:
-                            collect_sources(numeric[key])
-                elif parent in numeric:
-                    collect_sources(numeric[parent])
-
-        for fact in facts:
-            collect_sources(fact)
-        correction_evidence = {f"source_record:{i}": row
-            for i, row in enumerate(source_records.values(), 1)}
-        review_failure = None
-        try:
-            review = review_model(source.run.complete, calculation_action, facts, model_context,
-                                  correction_evidence=correction_evidence)
-        except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
-            review_failure = source.failure_result(exc, "model_support_assessment")
-            review = {"admit": False, "completed": False, "reason": "Model support assessment did not complete",
-                      "limitations": []}
-        if review.get("invalid_evidence"):
-            staged.merge(correct_input_records(review["invalid_evidence"], correction_evidence, staged))
-            # Return the changed input state to the owning episode. This action's
-            # reviewed operands were withdrawn; do not retry them or silently run
-            # a replacement set under the previous support judgment.
-            return staged.result(evaluated=True)
-        result = execute_tool(calculation_action, staged, source.run.metrics, review=review)
-        if review_failure is not None:
-            result = replace(result, diagnostics=(*result.diagnostics, *review_failure.diagnostics))
+        result = execute_tool(proposal, staged, source.run.metrics)
         staged.merge(result)
         return staged.result(evaluated=result.evaluated)
 
@@ -208,8 +130,6 @@ class GuidelineSource(ResearchSource):
                 "subject": {**prose, "description": "Reviewed scenario for the selected tool"},
                 "source_inputs": strings("For a source/calibration calculation only: native_input_records references, one value per field. Omit for target calculations, whose inputs bind automatically.",
                                  options, minimum=1),
-                "conditions": {"type": "object", "additionalProperties": False,
-                    "properties": {name: {**prose, "description": "Use the supplied condition_ref for an existing hypothesis, or write a new physical condition hypothesis. References resolve to the recorded statement for this exact subject and condition."} for name in CONDITIONS}},
                 "basis": {**prose, "description": "Named parameterization or comparison rationale"},
                 "parameterization": {**prose, "description": "Stable physical-model name, reused across tools; it never overrides main-table numeric inputs"},
                 "metrics": strings("Omit to use this tool's requested outputs, or choose only names permitted by its action-specific schema below. Geometry-derived input parameters are emitted automatically, not selected here.",
@@ -262,9 +182,7 @@ class GuidelineSource(ResearchSource):
                        "not": {"required": ["operator"], "properties": {"operator": {"const": "transfer_parameter"}}}},
                 "then": {"properties": {
                     "source_inputs": strings("Native operands belonging to this source/calibration case",
-                                     [key for key, fact in options.items() if fact.subject == subject], minimum=1),
-                    "conditions": {"properties": {name: {"const": "condition:" + identity([subject, name, statement])[:12]}
-                        for name, statement in definition.get("fixed_conditions", {}).items()}}}}}
+                                     [key for key, fact in options.items() if fact.subject == subject], minimum=1)}}}
                 for subject, definition in ledger.scenarios.items())
         target_subjects = [subject for subject, definition in ledger.scenarios.items()
                            if definition.get("role", "target") == "target"]
@@ -297,213 +215,181 @@ class GuidelineSource(ResearchSource):
                if "compare_predictions_with_observations" in self.run.tools else {}),
             scientific_progress=scientific_progress(self.ledger.result(), self.run.metrics, decision_view=True),
             instruction=(
-                "Choose one useful action toward the original request, informed by prior results. "
-                "At each root decision, try a requested calculation as soon as selected numeric "
-                "facts or recorded hypotheses and physically applicable conditions make it executable. "
-                "Also consider a ready intermediate calculation in calculation_steps; it can advance "
-                "the requested outputs before all their inputs are found. Geometry with metrics=[] "
-                "computes available derived inputs from the target main table. "
-                "Prefer a new provisional calculation to another investigation when it would fill a "
-                "missing requested output using the current main-table inputs; weak evidence lowers "
-                "support, not the value of learning that consequence. If a calculation lacks a specific "
-                "physical input, request a narrowly scoped assumption_hypotheses investigation to "
-                "propose a qualified value, then reconsider calculation when it returns. Do not spend "
-                "another source_findings branch collecting every possible context detail first. "
-                "This run performs the scientific investigation using the existing workflow and "
-                "calculation kernels; an implementation plan or input glossary is not its result. "
-                "No fixed action sequence, no stop/report/assessment action. If context.fixed_scenarios "
-                "is true, the caller has selected and defined every TARGET case. Do not discover, propose, "
-                "replace or alter target scenarios. Their fixed_parameters and fixed_conditions define scope, "
-                "not empirical evidence; use the supplied options without reassessing those givens. "
-                "Investigate the remaining assumptions. Read each case's output_contracts. "
-                "The upfront constants judge recorded model_defaults before scenario sharing. "
-                "Retained physical baselines are supplied automatically with their conditional "
-                "provenance and earn no discovery credit; do not investigate or reassess them. "
-                "Only defaults explicitly promoted for a case remain parameter needs. "
-                "Name the calculation parameter served by each investigation in parameter. "
-                "Shared credit tracks the predefined independent target values and calculation steps; "
-                "strategies cannot add requirements by naming more settings, sources or topics. Search choices "
-                "remain yours. Credit measures found independent parameters, qualifying evidence learning "
-                "and completed calculation steps. Read global_scientific_goal.calculation_steps.credit_policy "
-                "for the numerical rates and eligibility requirements. Requested final outputs receive "
-                "the requested_output_multiplier; intermediate calculations use the base rates. "
-                "The table's points and credit components already include that multiplier. Compare "
-                "earned credit with the credit available from completing missing requested outputs "
-                "or updating stale results. Each requested output contributes separately; there is "
-                "no additional all-task completion bonus. "
-                "The caller's target cases were compared before research and equivalent parameter "
-                "needs were grouped as independent unknowns. A numeric_option shared from another "
-                "case belongs to the selected target's group and is bound automatically when it is the "
-                "main selected value. Do not request a duplicate hypothesis for that group. "
-                "Give each investigation a specific question and only the context necessary to answer it. "
-                "For investigate, include calculation_deferrals identifying one or more requested-output "
-                "rows affected by this choice, using the defined reason codes and current table references. "
-                "Use improving_evidence_support when choosing stronger evidence even though calculation "
-                "is possible. This records your decision; it does not change readiness or credit. "
-                "Use [] only when the table has no requested-output rows; omit it for calculation actions. "
-                "Name only the target subjects involved; use [] for source discovery without a target assignment. "
-                "An empty subjects list leaves target applicability open; it does not prohibit estimates "
-                "for relevant existing targets or registered source calibration contexts. "
-                "The child contract retains the full caller-defined target set, including fixed inputs "
-                "and conditions, while subjects marks this episode's local investigation. This lets "
-                "source discovery assess applicability across the requested cases even with subjects=[]. "
-                "Do not pass your whole requirement list to a child. Its return contains structured "
-                "parameter_results (numbers, units, origin, status and declared references), reviews "
-                "(verdict, completed and criterion grades), calculations (output statuses, values and units), "
-                "reading_coverage (counts), operations (closed stage, category, status and count), and "
-                "completion (ended_by and evaluated). These records come from existing work-call JSON; "
-                "there is no separate summary call or free-form child message. Use the declared terms "
-                "and definitions to interpret them when choosing the next action. "
-                "Specify deliverable=source_findings when you need observed events, bounds or "
-                "applicability evidence without a new target hypothesis. Specify assumption_hypotheses "
-                "when you need recorded parameter values or condition hypotheses and their independent "
-                "reasonableness assessments. Evidence discovery and hypothesis justification have "
-                "different information contracts; either child may form a useful conditional estimate "
-                "or execute an available calculation. Useful target-value changes return control at an "
-                "ordinary episode boundary so you can reconsider the whole target table. "
-                "An evidence-based outbreak calibration is also required. Acquire observed outbreak counts, "
-                "duration and context through investigate's search children. Source observations "
-                "retain their actual event subject. Register a separate calibration context in scenarios "
-                "using that exact admitted subject and role=calibration; this does not add a target case. "
-                "Investigate missing event assumptions, then use calibrate_infectiousness with "
-                "cq_from_steady_outbreak or cq_from_transient_outbreak. That tool contains the "
-                "calibrate_cq_from_outbreak subtask. Eligible derived source Cq automatically enters "
-                "matching target alternatives with its calculation lineage and value-specific relevance. "
-                "Subsequent target calculations bind the main selected value automatically; a second transfer proposal "
-                "is not required. Use cq_activity_rescaling only when an explicit activity adjustment "
-                "is justified by its inputs. Assess transfer compatibility, "
-                "including the runtime disease/variant and activity, without double scaling. A source's "
-                "published Cq is not an outbreak inversion performed by this workflow. "
-                "An emission-to-breathing quotient is also a usable conditional estimate, but is not an "
-                "independent outbreak inversion. Missing calibration does not block found target values, "
-                "bounded best guesses or provisional target calculations. Pursue that remaining calibration "
-                "requirement alongside other missing inputs; do not make a broad outbreak search a "
-                "prerequisite to filling or calculating the target table. "
-                "scientific_progress.targets reports calibration_linkage for each parameterization. "
-                "A supported solution and a calibrated solution in different parameterizations do not "
-                "complete the goal. Performing an inversion is distinct from using its derived value "
-                "in each target's three calculations; those contributions are credited separately. "
-                "calculate_conditional_limits exposes solve_time through allowable_room_time_s "
-                "and transient_allowable_room_time_s: FIX neighbor_distance_m and SOLVE duration. "
-                "Its solve_distance operation uses safe_distance_m and transient_safe_distance_m: "
-                "FIX exposure_time_s and SOLVE separation. calculate_transmission_metrics exposes "
-                "evaluate_R_in through scenario_reproductive_number and transient_scenario_reproductive_number: "
-                "FIX BOTH exposure_time_s and neighbor_distance_m. All three operations use the "
-                "same risk model and assumptions within a background regime. Background-only legacy "
-                "outputs and the concentration crossover do not substitute for these requested answers. "
-                "Before model review and execution, the tool binds caller-supplied reference inputs, "
-                "retained defaults and the authoritative main-table scientific values. These reference inputs are not the "
-                "unknown being solved for and are not discoveries to research or reassess. Never "
-                "copy the reference separation as a calculated safe distance or replace it with "
-                "random spacing. Omitted target-case reference inputs are filled by the scenario "
-                "loader using the declared reference defaults, not selected by the agent. These "
-                "defaults never supply an outbreak's exposure duration. calculation_variables remain free variables "
-                "for explicitly requested legacy relationships, not scalar safety answers. "
-                "In particular, do not invent an exposure duration to fill a risk "
-                "or distance output. This restriction applies to declared calculation variables, not "
-                "to proposing reasoned physical hypotheses. A source range need not choose a scalar "
-                "for the investigator: choosing and qualifying that hypothesis is its responsibility. "
-                "Calibration contexts must be grounded in acquired observations, not invented outbreaks. "
-                "Reference existing subjects without "
-                "redeclaring or paraphrasing their definitions. "
-                "Investigate unresolved assumptions, conflicting evidence, or prediction discrepancies. "
-                "Target calculations take the target subject, tool, requested metrics and condition references "
-                "from condition_hypotheses or the scenario's fixed_conditions. Existing condition_ref values "
-                "resolve deterministically to the stored statement for that subject and field; do not reconstruct "
-                "unseen wording. You may propose a new physical condition hypothesis when needed. "
-                "Calculations automatically use the main table, including unsupported main values; "
-                "do not supply facts or select numeric alternatives. Source/calibration calculations "
-                "retain their own native operands through source_calculation_inputs. "
-                "Native source values and eligible source calculations automatically create target input alternatives. The main table "
-                "selects the alternative with the highest source-scenario relevance for that value and "
-                "parameter; every target calculation binds that value. Low or unknown relevance does not block "
-                "a found value or its discovery credit. Additional inferred hypotheses originate in "
-                "investigate, not as hidden literals in a tool call. Evidence quality qualifies "
-                "conclusion support. Calculating the main estimate can expose a discrepancy without validating it. "
-                "Recalculate when main values or model claims change. Competing numeric candidates remain "
-                "in the evidence history and may become the main value through relevance ranking; they "
-                "cannot be selected separately for a target calculation. "
-                "Inspect global_scientific_goal.calculation_steps, including each row's value, units, "
-                "status, credit, ready_to_calculate and ready_to_recalculate flags. Changed "
-                "dependencies remove current-result credit; retained method credit records only prior "
-                "successful work, not present applicability. At each ordinary decision, "
-                "consider a useful ready recalculation alongside other ways to advance the Goal. "
-                "Develop provisional numerical results and iteratively strengthen their assumptions or "
-                "revise their consequences. Numerical coverage and evidential support are concurrent needs, "
-                "not phases where every missing output must be filled before any weak result is revisited. "
-                "Do not wait for all assumptions to be "
-                "well supported before using the calculation tools. This is a scientific objective, not a fixed action order. "
-                "A calculation for a scoped case can reveal concrete gaps relevant to the other fixed cases; "
-                "resolving every uncertainty across all cases is not a prerequisite to that calculation. "
-                "Use one stable parameterization name for compatible input assumptions across tools; a tool "
-                "or output-family name is not a different physical case. Distinguish steady, transient and "
-                "near-field regimes explicitly without fragmenting an otherwise shared parameterization. "
-                "A new review of an unchanged claim changes its support, not its computed consequence. "
-                "Read per-quantity coverage and metric_support: weak evidence for one input does not "
-                "invalidate outputs that do not use it. "
-                "Each calculation tool owns the output names in its action-specific metrics schema. "
-                "Omit metrics to use that tool's requested outputs. Geometry/removal derivations also "
-                "emit available input parameters automatically; do not put those input names in metrics. "
-                "The same parameter derivations run inside the limit and transmission tools, so a separate "
-                "geometry step is not required when the selected inputs suffice. input_requirements shows "
-                "executable routes and their missing inputs/conditions, not a requirement to search for an "
-                "already implemented equation. An absent removal term requires an explicit hypothesis, "
-                "including when the proposed term is zero; it is never silently zero. "
-                "Routes also declare parameter_constraints enforced by execution. If the selected case "
-                "falls outside every implemented route, identify that capability gap explicitly. "
-                "A differently worded condition or another supporting source cannot register a new kernel "
-                "or override those constraints. Evidence can inform a needed extension without making "
-                "it executable in this run. Such a gap does not resolve the requested quantity, but it "
-                "is not a prerequisite to strengthening other still-uncertain conclusions. "
-                "For all three operations, inspect the alternative routes and their physical hypotheses. The "
-                "negligible_near_field condition explicitly selects a spatially uniform risk model for "
-                "time, distance AND R_in; "
-                "mask penetration alone does not justify or select it. A well-mixed background does "
-                "not establish negligible local exposure. Do not assume away local risk merely to fill "
-                "coverage. A zero minimum under that approximation means no positive separation is "
-                "imposed by the model, not that contact is safe. Retain the hypothesis and its uncertainty. "
-                "The transient continuous-jet route additionally requires an explicit "
-                "quasi_steady_local_plume hypothesis. It adds an immediately established local jet "
-                "to the time-evolving background; it is not a resolved transient-flow simulation. "
-                "That hypothesis may be provisionally calculated before evidence is strong, just "
-                "like other assumptions. Keep its uncertainty visible to the investigation. "
-                "A duration formula alone does not satisfy a requested scalar output contract. "
-                "A target scenario identifies the case or conditional experiment receiving estimates. "
-                "A model extension or unresolved equation is an investigation focus for a case, not a "
-                "separate target requiring its own complete report. Only when cases are not fixed and the request leaves them open, "
-                "explicitly scoped study cases may instantiate that open scope; do not substitute them "
-                "for specified cases or claim they establish results for every possible case. "
-                "Distinguish requester constraints from unresolved scientific assumptions and named "
-                "conditional study choices. An unspecified input is not automatically something only "
-                "the requester can supply: the investigation branch may propose and justify bounded "
-                "assumptions where appropriate. Such choices are neither universal defaults nor facts "
-                "about an unspecified real room. Preserve all requested outputs and case constraints. "
-                "General applicability does not mean one universal set of parameter values. Each target "
-                "uses its own main-table values with their rationale and current support distinguished from requester givens "
-                "and source observations. Missing justification remains a research need, not an execution gate. "
-                "scientific_progress separates computed quantities, evidence-supported quantities and "
-                "coherent parameterization coverage, using the same projection as closure. Its figures "
-                "retain named assumptions; assumption_support_needs links weaker premises to affected outputs. "
-                "quantity_coverage exposes an output still absent across the cases. Progress on other "
-                "quantities does not resolve it or make it optional. Use the child's structured records to "
-                "distinguish missing proposed inputs, uncertain evidence and actual model inapplicability; "
-                "generic evidence alone is not a reason that a provisional hypothesis cannot be formed. "
-                "computed_but_unsupported_subjects remains part of the scientific goal, even when "
-                "another output lacks an executable route. Judge new investigations by the uncertainty "
-                "they can change, including support for existing results, not by empty-field count alone. "
-                "Improving a review can strengthen existing results without repeating the arithmetic. "
-                "A current result meeting its output contract earns method and current-result credit "
-                "independently of its scientific support review. Current support can increase "
-                "requested-output credit according to calculation_steps.credit_policy; a rejected or "
-                "incomplete support review does not remove completion credit. Copying a reference input, computing a legacy metric, "
-                "repeating arithmetic, or excluding a kernel does not answer a missing requested operation. "
-                "There is no fixed action order; apply the newly executable calculation "
-                "preference above at each root decision. "
-                "The registered equations are already executable kernels; verifying their scientific "
-                "basis may resolve uncertainty, but transcribing them is not itself a prerequisite "
-                "for tool availability or a numerical safety conclusion. "
-                "The requested output quantities are model outputs, not facts to search for verbatim. "
-                "Return an instance of the JSON Schema; omit fields not used by the selected action."
+                (
+                'Choose one useful action toward the original request, informed by prior results. At each root '
+                'decision, try a requested calculation as soon as selected numeric facts or recorded hypotheses and '
+                'physically applicable conditions make it executable. Also consider a ready intermediate calculation '
+                'in calculation_steps; it can advance the requested outputs before all their inputs are found. '
+                'Geometry with metrics=[] computes available derived inputs from the target main table. Prefer a new '
+                'provisional calculation to another investigation when it would fill a missing requested output using '
+                'the current main-table inputs; weak evidence lowers support, not the value of learning that '
+                'consequence. If a calculation lacks a specific physical input, request a narrowly scoped '
+                'assumption_hypotheses investigation to propose a qualified value, then reconsider calculation when '
+                'it returns. Do not spend another source_findings branch collecting every possible context detail '
+                'first. This run performs the scientific investigation using the existing workflow and calculation '
+                'kernels; an implementation plan or input glossary is not its result. No fixed action sequence, no '
+                'stop/report/assessment action. If context.fixed_scenarios is true, the caller has selected and '
+                'defined every TARGET case. Do not discover, propose, replace or alter target scenarios. Their '
+                'fixed_parameters and fixed_conditions define scope, not empirical evidence; use the supplied options '
+                "without reassessing those givens. Investigate the remaining assumptions. Read each case's "
+                'output_contracts. The upfront constants judge recorded model_defaults before scenario sharing. '
+                'Retained physical baselines are supplied automatically with their conditional provenance and earn no '
+                'discovery credit; do not investigate or reassess them. Only defaults explicitly promoted for a case '
+                'remain parameter needs. Name the calculation parameter served by each investigation in parameter. '
+                'Shared credit tracks the predefined independent target values and calculation steps; strategies '
+                'cannot add requirements by naming more settings, sources or topics. Search choices remain yours. '
+                'Credit measures found independent parameters, qualifying evidence learning and completed calculation '
+                'steps. Read global_scientific_goal.calculation_steps.credit_policy for the numerical rates and '
+                'eligibility requirements. Requested final outputs receive the requested_output_multiplier; '
+                "intermediate calculations use the base rates. The table's points and credit components already "
+                'include that multiplier. Compare earned credit with the credit available from completing missing '
+                'requested outputs or updating stale results. Each requested output contributes separately; there is '
+                "no additional all-task completion bonus. The caller's target cases were compared before research and "
+                'equivalent parameter needs were grouped as independent unknowns. A numeric_option shared from '
+                "another case belongs to the selected target's group and is bound automatically when it is the main "
+                'selected value. Do not request a duplicate hypothesis for that group. Give each investigation a '
+                'specific question and only the context necessary to answer it. For investigate, include '
+                'calculation_deferrals identifying one or more requested-output rows affected by this choice, using '
+                'the defined reason codes and current table references. Use improving_evidence_support when choosing '
+                'stronger evidence even though calculation is possible. This records your decision; it does not '
+                'change readiness or credit. Use [] only when the table has no requested-output rows; omit it for '
+                'calculation actions. Name only the target subjects involved; use [] for source discovery without a '
+                'target assignment. An empty subjects list leaves target applicability open; it does not prohibit '
+                'estimates for relevant existing targets or registered source calibration contexts. The child '
+                'contract retains the full caller-defined target set, including fixed inputs and conditions, while '
+                "subjects marks this episode's local investigation. This lets source discovery assess applicability "
+                'across the requested cases even with subjects=[]. Do not pass your whole requirement list to a '
+                'child. Its return contains structured parameter_results (numbers, units, origin, status and declared '
+                'references), reviews (verdict, completed and criterion grades), calculations (output statuses, '
+                'values and units), reading_coverage (counts), operations (closed stage, category, status and count), '
+                'and completion (ended_by and evaluated). These records come from existing work-call JSON; there is '
+                'no separate summary call or free-form child message. Use the declared terms and definitions to '
+                'interpret them when choosing the next action. Specify deliverable=source_findings when you need '
+                'observed events, bounds or applicability evidence without a new target hypothesis. Specify '
+                'assumption_hypotheses when you need recorded parameter estimates with their rationale and '
+                'provenance. Evidence discovery and hypothesis justification have different information contracts; '
+                'either child may form a useful conditional estimate or execute an available calculation. Useful '
+                'target-value changes return control at an ordinary episode boundary so you can reconsider the whole '
+                'target table. An evidence-based outbreak calibration is also required. Acquire observed outbreak '
+                "counts, duration and context through investigate's search children. Source observations retain their "
+                'actual event subject. Register a separate calibration context in scenarios using that exact admitted '
+                'subject and role=calibration; this does not add a target case. Investigate missing event '
+                'assumptions, then use calibrate_infectiousness with cq_from_steady_outbreak or '
+                'cq_from_transient_outbreak. That tool contains the calibrate_cq_from_outbreak subtask. Eligible '
+                'derived source Cq automatically enters matching target alternatives with its calculation lineage and '
+                'value-specific relevance. Subsequent target calculations bind the main selected value automatically; '
+                'a second transfer proposal is not required. Use cq_activity_rescaling only when an explicit activity '
+                'adjustment is justified by its inputs. Assess transfer compatibility, including the runtime '
+                "disease/variant and activity, without double scaling. A source's published Cq is not an outbreak "
+                'inversion performed by this workflow. An emission-to-breathing quotient is also a usable conditional '
+                'estimate, but is not an independent outbreak inversion. Missing calibration does not block found '
+                'target values, bounded best guesses or provisional target calculations. Pursue that remaining '
+                'calibration requirement alongside other missing inputs; do not make a broad outbreak search a '
+                'prerequisite to filling or calculating the target table. scientific_progress.targets reports '
+                'calibration_linkage for each parameterization. A supported solution and a calibrated solution in '
+                'different parameterizations do not complete the goal. Performing an inversion is distinct from using '
+                "its derived value in each target's three calculations; those contributions are credited separately. "
+                'calculate_conditional_limits exposes solve_time through allowable_room_time_s and '
+                'transient_allowable_room_time_s: FIX neighbor_distance_m and SOLVE duration. Its solve_distance '
+                'operation uses safe_distance_m and transient_safe_distance_m: FIX exposure_time_s and SOLVE '
+                'separation. calculate_transmission_metrics exposes evaluate_R_in through '
+                'scenario_reproductive_number and transient_scenario_reproductive_number: FIX BOTH exposure_time_s '
+                'and neighbor_distance_m. All three operations use the same risk model and assumptions within a '
+                'background regime. Background-only legacy outputs and the concentration crossover do not substitute '
+                'for these requested answers. Before execution, the tool binds caller-supplied reference inputs, '
+                'retained defaults and the authoritative main-table scientific values. These reference inputs are not '
+                'the unknown being solved for and are not discoveries to research or reassess. Never copy the '
+                'reference separation as a calculated safe distance or replace it with random spacing. Omitted '
+                'target-case reference inputs are filled by the scenario loader using the declared reference '
+                "defaults, not selected by the agent. These defaults never supply an outbreak's exposure duration. "
+                'calculation_variables remain free variables for explicitly requested legacy relationships, not '
+                'scalar safety answers. In particular, do not invent an exposure duration to fill a risk or distance '
+                'output. This restriction applies to declared calculation variables, not to proposing reasoned '
+                'physical hypotheses. A source range need not choose a scalar for the investigator: choosing and '
+                'qualifying that hypothesis is its responsibility. Calibration contexts must be grounded in acquired '
+                'observations, not invented outbreaks. Reference existing subjects without redeclaring or '
+                'paraphrasing their definitions. Investigate unresolved assumptions, conflicting evidence, or '
+                'prediction discrepancies. Target calculations take the target subject, tool and requested metrics. '
+                'Model conditions bind exclusively from that scenario; do not supply or override conditions. '
+                'Calculations automatically use the main table, including unsupported main values; do not supply '
+                'facts or select numeric alternatives. Source/calibration calculations retain their own native '
+                'operands through source_calculation_inputs. Native source values and eligible source calculations '
+                'automatically create target input alternatives. The main table selects the alternative with the '
+                'highest source-scenario relevance for that value and parameter; every target calculation binds that '
+                'value. Low or unknown relevance does not block a found value or its discovery credit. Additional '
+                'inferred hypotheses originate in investigate, not as hidden literals in a tool call. Evidence '
+                'quality qualifies conclusion support. Calculating the main estimate can expose a discrepancy without '
+                'validating it. Recalculate when main values or model claims change. Competing numeric candidates '
+                'remain in the evidence history and may become the main value through relevance ranking; they cannot '
+                'be selected separately for a target calculation. Inspect global_scientific_goal.calculation_steps, '
+                "including each row's value, units, status, credit, ready_to_calculate and ready_to_recalculate "
+                'flags. Changed dependencies remove current-result credit; retained method credit records only prior '
+                'successful work, not present applicability. At each ordinary decision, consider a useful ready '
+                'recalculation alongside other ways to advance the Goal. Develop provisional numerical results and '
+                'iteratively strengthen their assumptions or revise their consequences. Numerical coverage and '
+                'evidential support are concurrent needs, not phases where every missing output must be filled before '
+                'any weak result is revisited. Do not wait for all assumptions to be well supported before using the '
+                'calculation tools. This is a scientific objective, not a fixed action order. A calculation for a '
+                'scoped case can reveal concrete gaps relevant to the other fixed cases; resolving every uncertainty '
+                'across all cases is not a prerequisite to that calculation. Use one stable parameterization name for '
+                'compatible input assumptions across tools; a tool or output-family name is not a different physical '
+                'case. Distinguish steady, transient and near-field regimes explicitly without fragmenting an '
+                'otherwise shared parameterization. Unchanged inputs reuse current computed results; relevance '
+                'changes alone do not require arithmetic again. Read per-quantity coverage and metric_support: weak '
+                'evidence for one input does not invalidate outputs that do not use it. Each calculation tool owns '
+                "the output names in its action-specific metrics schema. Omit metrics to use that tool's requested "
+                'outputs. Geometry/removal derivations also emit available input parameters automatically; do not put '
+                'those input names in metrics. The same parameter derivations run inside the limit and transmission '
+                'tools, so a separate geometry step is not required when the selected inputs suffice. '
+                'input_requirements shows executable routes and their missing inputs/conditions, not a requirement to '
+                'search for an already implemented equation. An absent removal term requires an explicit hypothesis, '
+                'including when the proposed term is zero; it is never silently zero. Routes also declare '
+                'parameter_constraints enforced by execution. If the selected case falls outside every implemented '
+                'route, identify that capability gap explicitly. A differently worded condition or another supporting '
+                'source cannot register a new kernel or override those constraints. Evidence can inform a needed '
+                'extension without making it executable in this run. Such a gap does not resolve the requested '
+                'quantity, but it is not a prerequisite to strengthening other still-uncertain conclusions. For all '
+                'three operations, inspect the alternative routes and their physical hypotheses. The '
+                'negligible_near_field condition explicitly selects a spatially uniform risk model for time, distance '
+                'AND R_in; mask penetration alone does not justify or select it. A well-mixed background does not '
+                'establish negligible local exposure. Do not assume away local risk merely to fill coverage. A zero '
+                'minimum under that approximation means no positive separation is imposed by the model, not that '
+                'contact is safe. Retain the hypothesis and its uncertainty. The transient jet formula adds an '
+                'immediately established local term to the time-evolving background. Record the approximation; it is '
+                'not an extra review prerequisite. A duration formula alone does not satisfy a requested scalar '
+                'output contract. A target scenario identifies the case or conditional experiment receiving '
+                'estimates. A model extension or unresolved equation is an investigation focus for a case, not a '
+                'separate target requiring its own complete report. Only when cases are not fixed and the request '
+                'leaves them open, explicitly scoped study cases may instantiate that open scope; do not substitute '
+                'them for specified cases or claim they establish results for every possible case. Distinguish '
+                'requester constraints from unresolved scientific assumptions and named conditional study choices. An '
+                'unspecified input is not automatically something only the requester can supply: the investigation '
+                'branch may propose and justify bounded assumptions where appropriate. Such choices are neither '
+                'universal defaults nor facts about an unspecified real room. Preserve all requested outputs and case '
+                'constraints. General applicability does not mean one universal set of parameter values. Each target '
+                'uses its own main-table values with their rationale and current support distinguished from requester '
+                'givens and source observations. Missing justification remains a research need, not an execution '
+                'gate. scientific_progress separates computed quantities, evidence-supported quantities and coherent '
+                'parameterization coverage, using the same projection as closure. Its figures retain named '
+                'assumptions; assumption_support_needs links weaker premises to affected outputs. quantity_coverage '
+                'exposes an output still absent across the cases. Progress on other quantities does not resolve it or '
+                "make it optional. Use the child's structured records to distinguish missing proposed inputs, "
+                'uncertain evidence and actual model inapplicability; generic evidence alone is not a reason that a '
+                'provisional hypothesis cannot be formed. computed_but_unsupported_subjects remains part of the '
+                'scientific goal, even when another output lacks an executable route. Judge new investigations by the '
+                'uncertainty they can change, including support for existing results, not by empty-field count alone. '
+                'New evidence and relevance records do not require repeating unchanged arithmetic. A current result '
+                'meeting its output contract earns method and current-result credit independently of its scientific '
+                'support review. Current support can increase requested-output credit according to '
+                'calculation_steps.credit_policy; a rejected or incomplete support review does not remove completion '
+                'credit. Copying a reference input, computing a legacy metric, repeating arithmetic, or excluding a '
+                'kernel does not answer a missing requested operation. There is no fixed action order; apply the '
+                'newly executable calculation preference above at each root decision. The registered equations are '
+                'already executable kernels; verifying their scientific basis may resolve uncertainty, but '
+                'transcribing them is not itself a prerequisite for tool availability or a numerical safety '
+                'conclusion. The requested output quantities are model outputs, not facts to search for verbatim. '
+                'Return an instance of the JSON Schema; omit fields not used by the selected action. '
+            )
             ),
             response_contract=self.proposal_schema()))
         proposal = self.resolve_decision_references(proposal)
@@ -640,171 +526,144 @@ class InvestigationSource(ResearchSource):
             **({"observed_fact_options": {key: row for key, row in records["facts"].items()
                                          if row["kind"] == "source_observation"}}
                if "compare_predictions_with_observations" in self.run.tools else {}),
-            reasonableness_rubric=RUBRIC,
+
             episode_responsibilities={
                 "this_investigation": "Meet the parent's information contract through assessed hypotheses from accumulated evidence and chosen evidence strategies. When existing inputs permit a requested calculation, execute its deterministic tool here and share that progress with the whole Goal.",
                 "strategy_child": "Acquire native source values and evidence. Each numeric commit automatically creates matching target alternatives, selects the highest value-specific source relevance, and updates shared credit. Inferred hypotheses remain this investigation's responsibility.",
                 "scientific_parent": "Use shared calculation and evidence progress to select the next investigation or calculation.",
             },
             instruction=(
-                "You are the investigation episode, responsible for connecting source evidence to the "
-                "parent's scientific Goal. Native values and eligible source calculations automatically enter matching independent "
-                "target groups; their highest value-specific source relevance selects the main-table value "
-                "and updates global credit without another proposal or review. Target calculations bind those "
-                "main values automatically. Propose an inferred hypothesis only when inference or another candidate "
-                "is needed. Use the information you already have to infer missing "
-                "parameters: recognize related quantity names, convert units, recast measurements, "
-                "or calculate an estimate from other quantities when the physical reasoning permits it. "
-                "Record each inferred numeric candidate as entry_type=best_guess, with its own "
-                "canonical value and unit, source_refs and input_refs from inference_inputs, the "
-                "reasoning and arithmetic in basis, and any added_assumptions. Preserve the native "
-                "meaning of each source measurement; your inference is a separate parameter claim. "
-                "To submit candidates using accumulated evidence now, omit action and return a "
-                "nonempty candidates array. The normal mandatory assessment follows immediately; "
-                "no new search, tool or child is required. Empty references honestly declare an "
-                "unsupported guess; they do not manufacture evidence. Choose evidence_strategy "
-                "when you need additional evidence, or choose an available calculation tool when selected existing inputs and physically "
-                "applicable conditions can produce a requested result or a ready intermediate step. "
-                "Geometry with metrics=[] computes available derived inputs from the target main table. "
-                "Choose the target subject, tool, metrics and existing condition_ref values from "
-                "condition_hypotheses or the scenario's fixed_conditions. References resolve to the stored "
-                "statement for that exact subject and field; do not reconstruct unseen wording. "
-                "You may write a new physical condition hypothesis when needed. Do not supply facts "
-                "or numeric alternatives. Source/calibration tools use source_calculation_inputs for "
-                "their native operands. A new hypothesis must be registered and ranked before it can "
-                "become the main input; it cannot be inserted into a target tool call. "
-                "Prefer a newly executable provisional calculation to another long evidence strategy "
-                "when it advances the shared Goal. A calculation here retains its source and assumption "
-                "lineage and returns to the parent in the structured calculations records. Inspect "
-                "global_scientific_goal.calculation_steps, including each row's value, units, status, "
-                "credit, ready_to_calculate and ready_to_recalculate flags: changed dependencies "
-                "remove current-result credit, while retained method credit records prior successful work, "
-                "not present applicability. Consider useful ready recalculations at the next ordinary "
-                "decision; this does not prescribe an action sequence. For evidence_strategy, "
-                "include calculation_deferrals identifying the requested-output rows affected by "
-                "further investigation, with defined reason codes and current table references. "
-                "improving_evidence_support remains valid when calculation is possible. Use [] only "
-                "when no requested-output rows exist. Omit calculation_deferrals for calculation "
-                "actions and candidates-only inference. These records do not change readiness or credit. "
-                "Choose candidate hypotheses and an evidence-acquisition approach "
-                "for this parent's scientific uncertainty. Put hypotheses you propose in this response's "
-                "candidates array. Read the parent's deliverable: source_findings needs source-grounded "
-                "answers, bounds and applicability limits and does not require inventing a target "
-                "hypothesis; it permits useful conditional estimates and calculations. "
-                "assumption_hypotheses needs recorded values or condition hypotheses. "
-                "An independent outbreak inversion may remain an overall research requirement; it is "
-                "not a prerequisite to filling a target input or calculating a provisional consequence. "
-                "A published input, a derived source estimate and a bounded best guess retain their "
-                "distinct provenance. An emission-to-breathing quotient does not become an independent "
-                "outbreak inversion. Use the available estimate while keeping that limitation explicit. "
-                "Automatic source-value entries already supply numeric alternatives. Inferred hypotheses "
-                "receive mandatory reasonableness assessment. Under either contract, any hypotheses you choose to propose "
-                "must be recorded in the "
-                "candidates array. Asking the strategy child to construct a parameterization, choose "
-                "values or independently assess assumptions does not perform that work: its contract "
-                "extracts source values automatically but does not perform new physical inferences. Mandatory reasonableness review assesses "
-                "only candidates actually recorded by this investigation. "
-                "Admitted source values and ranges can inform your own conditional choices with an "
-                "explicit applicability rationale; they need not already be labeled with the target "
-                "subject. A source range may support a provisional scalar hypothesis without selecting "
-                "one for you. Identify which uncertainty would change that choice or its support. "
-                "The prohibition on arbitrary exposure durations or scenario replacement does not prohibit "
-                "physical-parameter estimation within a fixed case. Distinguish the case's declared "
-                "calculation_variables from missing physical inputs. For the latter, reason from available "
-                "ranges, transferable measurements, dimensional constraints or clearly labeled guesses; "
-                "name the applicability premise and what could overturn it. A range can motivate one "
-                "qualified hypothesis or competing input candidates without constituting a direct "
-                "measurement. Do not defer a whole requested output merely because the source did not "
-                "select a scalar for you. If a proposed approximation would contradict the fixed case "
-                "or the available model, explain that specific conflict rather than inventing a compatible case. "
-                "Model constraints conveyed by the parent are execution limits, not evidence grades. "
-                "A new hypothesis can supply a missing parameter or qualify an applicable regime, but "
-                "cannot add a kernel or override its enforced constraints. Distinguish evidence that "
-                "would inform a model extension from an input the parent can calculate with now. "
-                "An empty candidates array is appropriate when this iteration is acquiring information "
-                "without proposing a new hypothesis. Check the shared target table: automatically "
-                "extracted values may already have filled the inputs. "
-                "Use previous failures to understand what remains unknown. You may propose or revise "
-                "named candidate assumptions and alternatives, but cannot mark them supported or assign credit. "
-                "A candidate statement describes a physical/scenario claim, not a research instruction or "
-                "a rule to use a model only after evidence is found. Existing registered_assumptions remain "
-                "recorded automatically. Use candidates=[] when this iteration proposes no new or revised "
-                "hypothesis; do not reconstruct or repeat an unchanged claim's unseen prose. Only new or "
-                "materially revised hypotheses need full candidate fields. Put a material premise revision "
-                "in the claim statement or identified source/input provenance. New evidence is considered "
-                "by the review without reproposing the unchanged claim. Changing a statement changes claim "
-                "identity and can invalidate calculations. "
-                "Source extraction and assumption inference have different contracts: extracted "
-                "numeric facts must be printed in a source, whereas a candidate may be an inferred "
-                "conditional value with a named rationale to test against numeric or qualitative "
-                "evidence. A formula inventory alone is not a justified target parameterization. "
-                "When a final parameter is not directly reported, consider measurements of its "
-                "ingredients, related systems, geometric or physical constraints, and explicit "
-                "approximations. Explain the inference, differences in context and uncertainty. "
-                "A guess can be proposed before justification exists; its assessment and credit must "
-                "reflect that weakness. If selected by relevance as the main value, the parent can calculate its consequences. "
-                "Do not restrict all evidence searches to a reference paper merely because it defines "
-                "the model. Choose the approach from the information needed and prior search outcomes. "
-                "A numeric candidate needs a finite JSON number, not a string or null. If a parameter has "
-                "no proposed value yet, omit that numeric candidate rather than using null. Explain in "
-                "approach which requested quantity remains unresolved and what reasoning or evidence "
-                "is needed to form a hypothesis; missing direct measurement alone does not prohibit "
-                "an inferred choice. Null is only for nonnumeric model conditions. "
-                "All numeric origins use the same registration, source-relevance grading and main-value selection "
-                "before reasonableness review. Mandatory assessment follows candidate-bearing iterations "
-                "and returned strategies, reusing a completed review when its claim, inputs, evidence "
-                "and scope are unchanged. It considers accumulated supporting and contrary evidence, "
-                "including inherited evidence, and does not gate numeric availability or found credit. "
-                "The system has already compared the selected cases and grouped parameter needs "
-                "that can use one value. Propose one candidate for an independent group; do not "
-                "duplicate it across that group's cases. "
-                "Retained model_defaults were reviewed before grouping and are already supplied "
-                "conditional physical premises. Do not propose or reassess them; only promoted "
-                "default properties appear among the case's remaining parameter needs. "
-                "A candidate is a hypothesis, never reported evidence. When context.fixed_scenarios is true, "
-                "preserve the caller's target cases and their fixed_parameters and fixed_conditions. "
-                "You may register a distinct source event identified by admitted observations as a "
-                "calibration scenario, using its exact source subject and role=calibration. For a "
-                "calculation on an unregistered event, include that scenarios declaration in the same "
-                "proposal as the calculation; scope review runs before execution. Reuse an already "
-                "registered subject without redeclaring it. The calculation subject must exactly match "
-                "the registered scenario and, except for transfer_parameter, every selected numeric "
-                "input's subject. Source-event grouping does not make different subject labels "
-                "interchangeable for calculation. Source evidence retains its actual event identity; "
-                "explain its applicability to the selected target cases. No stopping or separate assessment action."
-                " A scenario is a case or conditional experiment, not an equation or investigation topic."
-                " Every candidate subject must match a reviewed case. Source-event labels alone do not "
-                "establish a scope; source evidence retains its original identity and applicability must "
-                "be assessed for the target. Fixed-mode scenario registration is limited to these "
-                "source-grounded calibration contexts; the target set remains fixed. "
-                " The parent's information contract and requested subjects are in context. Source or "
-                "calibration subjects can supply evidence, but new templates do not substitute for "
-                "resolving assumptions for the requested subjects. Explain applicability to those subjects. "
-                "Propose hypotheses for your assigned parameter or its executable dependencies, within "
-                "the candidate schema's eligible subjects. With subjects=[], existing target cases remain "
-                "eligible; an empty assignment is not a ban on estimates. Registered source calibration "
-                "contexts are eligible for their own missing operands. Keep source hypotheses on their "
-                "actual source subject and target hypotheses on the target they describe. "
-                "At each decision, inspect independent_target_values for missing inputs and the shared "
-                "calculation_steps for ready work. Prefer a bounded useful estimate or executable "
-                "calculation over another source search that only repeats known caveats. New main-table "
-                "target values or changed selected values can return this episode at the next ordinary "
-                "boundary, letting the parent choose among all remaining parameters; no stop action is needed. "
-                "The parent-assigned parameter guides the question; shared credit covers all predefined "
-                "independent target values and calculation steps. Values for other target parameters "
-                "also count automatically. Additional source settings are not extra requirements. "
-                "Retain competing parameter values with their evidence and conditions. Highest value-specific "
-                "source relevance selects the main value, and only that value feeds target calculations. "
-                "Do not select a different value per calculation or by evidence count. Mandatory reasonableness review judges applicability "
-                "and contradictions. "
-                "Give the strategy child a specific evidence question and the necessary hypothesis "
-                "context in objective, not your whole assignment or a field checklist. Its structured "
-                "return contains parameter_results, reviews, calculations, reading_coverage, operations "
-                "and completion, with declared terms and definitions. Use its numeric results, review "
-                "grades, output statuses, coverage counts and operation outcomes to decide whether "
-                "this approach is informing the assumption. Existing work-call JSON supplies the "
-                "return; no separate summary call or free-form child message is produced. "
-                "Return an instance of the JSON Schema."
+                (
+                "You are the investigation episode, responsible for connecting source evidence to the parent's "
+                'scientific Goal. Native values and eligible source calculations automatically enter matching '
+                'independent target groups; their highest value-specific source relevance selects the main-table '
+                'value and updates global credit without another proposal or review. Target calculations bind those '
+                'main values automatically. Propose an inferred hypothesis only when inference or another candidate '
+                'is needed. Use the information you already have to infer missing parameters: recognize related '
+                'quantity names, convert units, recast measurements, or calculate an estimate from other quantities '
+                'when the physical reasoning permits it. Record each inferred numeric candidate as '
+                'entry_type=best_guess, with its own canonical value and unit, source_refs and input_refs from '
+                'inference_inputs, the reasoning and arithmetic in basis, and any added_assumptions. Preserve the '
+                'native meaning of each source measurement; your inference is a separate parameter claim. To submit '
+                'candidates using accumulated evidence now, omit action and return a nonempty candidates array. '
+                'Registration and value-specific relevance projection follow immediately; no separate '
+                'parameter-support review runs. Empty references honestly declare an unsupported guess; they do not '
+                'manufacture evidence. Choose evidence_strategy when you need additional evidence, or choose an '
+                'available calculation tool when selected existing inputs and physically applicable conditions can '
+                'produce a requested result or a ready intermediate step. Geometry with metrics=[] computes available '
+                'derived inputs from the target main table. Choose the target subject, tool and metrics. Model '
+                'conditions bind exclusively from the scenario; do not supply or override them. Do not supply facts '
+                'or numeric alternatives. Source/calibration tools use source_calculation_inputs for their native '
+                'operands. A new hypothesis must be registered and ranked before it can become the main input; it '
+                'cannot be inserted into a target tool call. Prefer a newly executable provisional calculation to '
+                'another long evidence strategy when it advances the shared Goal. A calculation here retains its '
+                'source and assumption lineage and returns to the parent in the structured calculations records. '
+                "Inspect global_scientific_goal.calculation_steps, including each row's value, units, status, credit, "
+                'ready_to_calculate and ready_to_recalculate flags: changed dependencies remove current-result '
+                'credit, while retained method credit records prior successful work, not present applicability. '
+                'Consider useful ready recalculations at the next ordinary decision; this does not prescribe an '
+                'action sequence. For evidence_strategy, include calculation_deferrals identifying the '
+                'requested-output rows affected by further investigation, with defined reason codes and current table '
+                'references. improving_evidence_support remains valid when calculation is possible. Use [] only when '
+                'no requested-output rows exist. Omit calculation_deferrals for calculation actions and '
+                'candidates-only inference. These records do not change readiness or credit. Choose candidate '
+                "hypotheses and an evidence-acquisition approach for this parent's scientific uncertainty. Put "
+                "hypotheses you propose in this response's candidates array. Read the parent's deliverable: "
+                'source_findings needs source-grounded answers, bounds and applicability limits and does not require '
+                'inventing a target hypothesis; it permits useful conditional estimates and calculations. '
+                'assumption_hypotheses needs recorded values or condition hypotheses. An independent outbreak '
+                'inversion may remain an overall research requirement; it is not a prerequisite to filling a target '
+                'input or calculating a provisional consequence. A published input, a derived source estimate and a '
+                'bounded best guess retain their distinct provenance. An emission-to-breathing quotient does not '
+                'become an independent outbreak inversion. Use the available estimate while keeping that limitation '
+                'explicit. Automatic source-value entries already supply numeric alternatives. Under either contract, '
+                'any hypotheses you choose to propose must be recorded in the candidates array. Asking the strategy '
+                'child to construct a parameterization, choose values or independently assess assumptions does not '
+                'perform that work: its contract extracts source values automatically but does not perform new '
+                'physical inferences. Admitted source values and ranges can inform your own conditional choices with '
+                'an explicit applicability rationale; they need not already be labeled with the target subject. A '
+                'source range may support a provisional scalar hypothesis without selecting one for you. Identify '
+                'which uncertainty would change that choice or its support. The prohibition on arbitrary exposure '
+                'durations or scenario replacement does not prohibit physical-parameter estimation within a fixed '
+                "case. Distinguish the case's declared calculation_variables from missing physical inputs. For the "
+                'latter, reason from available ranges, transferable measurements, dimensional constraints or clearly '
+                'labeled guesses; name the applicability premise and what could overturn it. A range can motivate one '
+                'qualified hypothesis or competing input candidates without constituting a direct measurement. Do not '
+                'defer a whole requested output merely because the source did not select a scalar for you. If a '
+                'proposed approximation would contradict the fixed case or the available model, explain that specific '
+                'conflict rather than inventing a compatible case. Model constraints conveyed by the parent are '
+                'execution limits, not evidence grades. A new hypothesis can supply a missing parameter or qualify an '
+                'applicable regime, but cannot add a kernel or override its enforced constraints. Distinguish '
+                'evidence that would inform a model extension from an input the parent can calculate with now. An '
+                'empty candidates array is appropriate when this iteration is acquiring information without proposing '
+                'a new hypothesis. Check the shared target table: automatically extracted values may already have '
+                'filled the inputs. Use previous failures to understand what remains unknown. You may propose or '
+                'revise named candidate assumptions and alternatives, but cannot mark them supported or assign '
+                'credit. A candidate statement describes a physical/scenario claim, not a research instruction or a '
+                'rule to use a model only after evidence is found. Existing registered_assumptions remain recorded '
+                'automatically. Use candidates=[] when this iteration proposes no new or revised hypothesis; do not '
+                "reconstruct or repeat an unchanged claim's unseen prose. Only new or materially revised hypotheses "
+                'need full candidate fields. Put a material premise revision in the claim statement or identified '
+                'source/input provenance. New evidence remains available with its provenance without reproposing an '
+                'unchanged claim. Changing a statement changes claim identity and can invalidate calculations. Source '
+                'extraction and assumption inference have different contracts: extracted numeric facts must be '
+                'printed in a source, whereas a candidate may be an inferred conditional value with a named rationale '
+                'to test against numeric or qualitative evidence. A formula inventory alone is not a justified target '
+                'parameterization. When a final parameter is not directly reported, consider measurements of its '
+                'ingredients, related systems, geometric or physical constraints, and explicit approximations. '
+                'Explain the inference, differences in context and uncertainty. A guess can be proposed before '
+                'justification exists; retain its estimate origin and rationale. If selected by relevance as the main '
+                'value, the parent can calculate its consequences. Do not restrict all evidence searches to a '
+                'reference paper merely because it defines the model. Choose the approach from the information needed '
+                'and prior search outcomes. A numeric candidate needs a finite JSON number, not a string or null. If '
+                'a parameter has no proposed value yet, omit that numeric candidate rather than using null. Explain '
+                'in approach which requested quantity remains unresolved and what reasoning or evidence is needed to '
+                'form a hypothesis; missing direct measurement alone does not prohibit an inferred choice. Null is '
+                'only for nonnumeric model conditions. All numeric origins use the same registration, '
+                'source-relevance grading and main-value selection. No separate parameter-support review follows '
+                'registration or a returned strategy. The system has already compared the selected cases and grouped '
+                'parameter needs that can use one value. Propose one candidate for an independent group; do not '
+                "duplicate it across that group's cases. Retained model_defaults were reviewed before grouping and "
+                'are already supplied conditional physical premises. Do not propose or reassess them; only promoted '
+                "default properties appear among the case's remaining parameter needs. A candidate is a hypothesis, "
+                "never reported evidence. When context.fixed_scenarios is true, preserve the caller's target cases "
+                'and their fixed_parameters and fixed_conditions. You may register a distinct source event identified '
+                'by admitted observations as a calibration scenario, using its exact source subject and '
+                'role=calibration. For a calculation on an unregistered event, include that scenarios declaration in '
+                'the same proposal as the calculation; scope review runs before execution. Reuse an already '
+                'registered subject without redeclaring it. The calculation subject must exactly match the registered '
+                "scenario and, except for transfer_parameter, every selected numeric input's subject. Source-event "
+                'grouping does not make different subject labels interchangeable for calculation. Source evidence '
+                'retains its actual event identity; explain its applicability to the selected target cases. No '
+                'stopping or separate assessment action. A scenario is a case or conditional experiment, not an '
+                'equation or investigation topic. Every candidate subject must match a reviewed case. Source-event '
+                'labels alone do not establish a scope; source evidence retains its original identity and '
+                'applicability must be assessed for the target. Fixed-mode scenario registration is limited to these '
+                "source-grounded calibration contexts; the target set remains fixed.  The parent's information "
+                'contract and requested subjects are in context. Source or calibration subjects can supply evidence, '
+                'but new templates do not substitute for resolving assumptions for the requested subjects. Explain '
+                'applicability to those subjects. Propose hypotheses for your assigned parameter or its executable '
+                "dependencies, within the candidate schema's eligible subjects. With subjects=[], existing target "
+                'cases remain eligible; an empty assignment is not a ban on estimates. Registered source calibration '
+                'contexts are eligible for their own missing operands. Keep source hypotheses on their actual source '
+                'subject and target hypotheses on the target they describe. At each decision, inspect '
+                'independent_target_values for missing inputs and the shared calculation_steps for ready work. Prefer '
+                'a bounded useful estimate or executable calculation over another source search that only repeats '
+                'known caveats. New main-table target values or changed selected values can return this episode at '
+                'the next ordinary boundary, letting the parent choose among all remaining parameters; no stop action '
+                'is needed. The parent-assigned parameter guides the question; shared credit covers all predefined '
+                'independent target values and calculation steps. Values for other target parameters also count '
+                'automatically. Additional source settings are not extra requirements. Retain competing parameter '
+                'values with their evidence and conditions. Highest value-specific source relevance selects the main '
+                'value, and only that value feeds target calculations. Do not select a different value per '
+                'calculation or by evidence count. Give the strategy child a specific evidence question and the '
+                'necessary hypothesis context in objective, not your whole assignment or a field checklist. Its '
+                'structured return contains parameter_results, reviews, calculations, reading_coverage, operations '
+                'and completion, with declared terms and definitions. Use its numeric results, review grades, output '
+                'statuses, coverage counts and operation outcomes to decide whether this approach is informing the '
+                'assumption. Existing work-call JSON supplies the return; no separate summary call or free-form child '
+                'message is produced. Return an instance of the JSON Schema. '
+            )
             ), response_contract=self.proposal_schema()))
         proposal = self.resolve_decision_references(proposal)
         self.last_proposal = proposal
@@ -878,13 +737,6 @@ class InvestigationSource(ResearchSource):
         return super().assess(working.result(evaluated=result.evaluated,
                                             stop_reason=result.stop_reason))
 
-    def review_registered_candidates(self, result):
-        """Apply the common cached support review after common value projection."""
-        working = Ledger(result)
-        working.merge(assess_registered_candidates(self.run.complete, working,
-            self.candidates, self.context(), self.failure_result,
-            stage="mandatory_reasonableness_assessment"))
-        return working.result(evaluated=result.evaluated, stop_reason=result.stop_reason)
 
 
 def run_guideline_research(*, disease, providers, research_request="", metrics=DEFAULT_METRICS, limits=None, scenario="bazant-bush"):

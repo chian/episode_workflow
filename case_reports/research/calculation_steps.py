@@ -85,7 +85,7 @@ def _requirements(field, numeric, conditions, options, variables=()):
         return min(alternatives, key=rank)
 
     def missing(route, visiting):
-        absent, absent_conditions, failures = set(), set(route["conditions"]) - conditions, []
+        absent, absent_conditions, failures = set(), set(), []
         for name in route["inputs"]:
             fields, needed, constraints = resolve(name, visiting)
             absent.update(fields)

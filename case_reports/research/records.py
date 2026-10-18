@@ -358,14 +358,14 @@ def sharing_scope_version(relation):
 
 
 def current_premises(record, assessments, *, ledger=None):
-    """Claim changes and refutations invalidate use; weak support alone does not."""
+    """Actual premise and scope changes govern numerical freshness, not review verdicts."""
     if record.get("invalidated_dependencies"):
         return False
     if not current_scenario_links(record, ledger):
         return False
     for key in record.get("assumption_keys", record.get("assumption_versions", {})):
         current = assessments.get(key)
-        if not assumption_matches(record, key, current) or current.get("review", {}).get("verdict") == "contradicted":
+        if not assumption_matches(record, key, current):
             return False
     return True
 

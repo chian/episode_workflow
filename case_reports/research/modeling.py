@@ -93,68 +93,6 @@ def source_calculation_inputs(action, ledger):
     return facts
 
 
-def review_model(agent, action, facts, context, *, correction_evidence=None):
-    from .assumptions import INPUT_ERROR_CODES, input_error_schema
-
-    correction_evidence = correction_evidence or {}
-    basis = action.get("basis")
-    if not isinstance(basis, str) or not basis.strip():
-        raise ValueError("Every parameterization requires a named rationale")
-    bindings = {fact.field: {k: v for k, v in fact.semantic_record().items()
-                            if k in {"subject", "value", "unit", "kind"}}
-                for fact in facts}
-    review = agent({
-        "operation": "review_research_model", "proposal": action,
-        "facts": [f.semantic_record() for f in facts], "context": context,
-        "resolved_numeric_inputs": bindings,
-        "selected_condition_statements": action.get("conditions", {}),
-        "input_source_records": correction_evidence,
-        "input_error_definitions": INPUT_ERROR_CODES,
-        "instruction": (
-            "resolved_numeric_inputs gives the actual calculation inputs and their canonical fields, "
-            "values, units and subjects. Target inputs are supplied automatically from the current main table. "
-            "Use these bindings to establish which inputs are present. The facts list "
-            "retains their provenance. Distinguish absent required inputs from present inputs with "
-            "weak evidence or disputed applicability. "
-            "Check scientific compatibility independently. Reject mixed events, ungrounded transfer "
-            "across activities, populations or variants, and double scaling of a "
-            "Cq already calibrated to a variant. Conditions are explicit modeling hypotheses, not "
-            "observations. Permit reasonable conditional alternatives with limitations. Check the "
-            "scenario's fixed user assumptions are preserved. A fit to its own data is not validation. "
-            "For the shared exposure model, time fixes distance, distance fixes time, and R_in fixes "
-            "both. The selected case's reference inputs are supplied coordinates, not calculated bounds. "
-            "All three operations in a regime must use the same physical assumptions. A transient "
-            "background plus an immediately established continuous jet requires the explicit "
-            "quasi_steady_local_plume approximation; assess its applicability and limitations. "
-            "Inputs may be explicitly recorded guesses with no evidence yet. A negative admit judgment "
-            "means scientific support is not established, not that the deterministic tool may not run. "
-            "Explain unsupported links separately from numerical inconsistency; a calculation can examine "
-            "a hypothesis without endorsing it. Do not require direct source reporting of inferred values. "
-            "For a distance model using negligible_near_field, assess that physical hypothesis separately "
-            "from well-mixed background or mask filtration. Mask penetration alone does not establish "
-            "negligible local enhancement throughout the occupied region. Computational convenience "
-            "or a desire to fill the missing distance output is not scientific support. "
-            "If an input_source_records entry misrecords the source quantity, number, unit, or "
-            "attribution, identify its exact reference and error code in invalid_evidence. "
-            "Assigning a source number to a different physical quantity is a quantity_mismatch "
-            "even when the number and unit were transcribed correctly. Weak support, a different "
-            "population or setting, and uncertainty in a transfer are not recording errors. "
-            "Do not reject a correct source record merely because its use here is unsupported. "
-            "A demonstrated recording error updates the input table and returns control before "
-            "this calculation executes; a negative support judgment alone does not prevent arithmetic."
-        ),
-        "response_contract": {"type": "object", "additionalProperties": False,
-            "required": ["admit", "reason", "invalid_evidence"], "properties": {
-                "admit": {"type": "boolean"}, "reason": {"type": "string", "minLength": 1},
-                "invalid_evidence": input_error_schema(correction_evidence),
-                "limitations": {"type": "array", "items": {"type": "string"}}}},
-    })
-    if type(review.get("admit")) is not bool or not isinstance(review.get("reason"), str) or not review["reason"].strip():
-        raise ValueError("Model review requires an admission decision and rationale")
-    limits = review.get("limitations", [])
-    if not isinstance(limits, list) or any(not isinstance(v, str) for v in limits):
-        raise ValueError("Model limitations must be text")
-    return review
 
 
 def derive_parameter(agent, action, facts, context):
@@ -166,7 +104,6 @@ def derive_parameter(agent, action, facts, context):
         raise ValueError("A derived parameter needs a subject")
     if operator != "transfer_parameter" and {f.subject for f in facts} != {subject}:
         raise ValueError("Calibration inputs must refer to the same event; explicit transfer is a separate hypothesis")
-    review = review_model(agent, action, facts, context)
     v = {f.field: f.value for f in facts}
     required = derivation_inputs(operator, v)
     missing = required - v.keys()
@@ -189,11 +126,11 @@ def derive_parameter(agent, action, facts, context):
     if not math.isfinite(value):
         raise ValueError("Derived parameter is not finite")
     fact = Fact(subject, field, value, UNITS[field], kind,
-                f"{operator}: {action['basis']}; review: {review['reason']}",
+                f"{operator}: {action['basis']}",
                 context="Conditional on the selected input provenance and model",
                 parents=tuple(f.key for f in facts if f.field in required))
     return ResearchResult((fact,), findings=(f"Derived {field}={value:.8g} for {subject}. "
-        "An outbreak inversion is calibration, not independent validation.", *review.get("limitations", [])))
+        "An outbreak inversion is calibration, not independent validation.",))
 
 
 def evaluate_model(agent, action, facts, context, metrics, *, assumptions=()):
@@ -220,12 +157,11 @@ def evaluate_model(agent, action, facts, context, metrics, *, assumptions=()):
             support_complete = False
         else:
             selected_assumptions.append(max(supported, key=lambda a: a["reasonableness"]))
-    review = review_model(agent, action, facts, context)
     result = evaluate_parameters({f.field: f.value for f in facts}, conditions, metrics,
                                 subject=subject, label=action["basis"],
                                 provenance={f.field: f.as_record() for f in facts})
     result["assumption_keys"] = [a["key"] for a in selected_assumptions]
     result["assumption_support"] = selected_assumptions
-    result["model_review"], result["support_complete"] = review, support_complete
+    result["model_review"], result["support_complete"] = {}, support_complete
     result["reasonableness"] = current_support(result, {a["key"]: a for a in assumptions})
-    return ResearchResult(estimates=(result,), findings=tuple(review.get("limitations", [])))
+    return ResearchResult(estimates=(result,))

@@ -95,16 +95,8 @@ class Metric:
         return record
 
     def parameter_constraints(self):
-        """One contract for executable exclusions and agent capability information."""
-        constraints = []
-        jet = self.regime in {"jet", "random_jet"} or self.regime.endswith("_jet")
-        if jet:
-            constraints.append({"field": "mask_penetration", "operator": "equal", "value": 1,
-                "reason": "The continuous-jet model requires unmasked emission and inhalation"})
-        if self.regime == "clean_start_interpolation":
-            constraints.append({"field": "initial_concentration_quanta_m3", "operator": "equal", "value": 0,
-                "reason": "The interpolation assumes a clean start"})
-        return constraints
+        """Numeric operands determine results; model descriptions do not gate execution."""
+        return []
 
 
 def metric(name, unit, inputs, formula, function, reference="Eq. 5", regime="well_mixed", interpretation=None):
@@ -230,14 +222,13 @@ def metric_routes(name):
 
 
 def select_metric(name, conditions):
-    if name in EXPOSURE_ROUTES:
-        if {"continuous_unmasked_jet", "negligible_near_field"} <= set(conditions):
-            raise ValueError("Jet and negligible-near-field hypotheses require separate parameterizations")
-        return EXPOSURE_ROUTES[name][1 if "negligible_near_field" in conditions else 0]
-    if name == "risk_threshold_distance_m" and "negligible_near_field" in conditions:
-        if "continuous_unmasked_jet" in conditions:
-            raise ValueError("Select either a continuous-jet distance model or negligible near-field enhancement, not both in one parameterization")
-        return WELL_MIXED_DISTANCE
+    if name in EXPOSURE_ROUTES or name == "risk_threshold_distance_m":
+        selected = {"continuous_unmasked_jet", "negligible_near_field"}.intersection(conditions)
+        if len(selected) != 1:
+            raise ValueError("The scenario must explicitly select continuous_unmasked_jet or negligible_near_field")
+        if name in EXPOSURE_ROUTES:
+            return EXPOSURE_ROUTES[name][1 if "negligible_near_field" in selected else 0]
+        return WELL_MIXED_DISTANCE if "negligible_near_field" in selected else METRICS[name]
     return METRICS[name]
 
 
@@ -282,11 +273,9 @@ def metric_catalog_record(name):
                         for route in metric_routes(name)]
     if name == "risk_threshold_distance_m" or name in EXPOSURE_OUTPUTS:
         record["route_selection"] = (
-            "negligible_near_field explicitly selects the spatially uniform risk model; "
-            "otherwise the continuous-unmasked-jet kernel applies. The two conditions cannot "
-            "be selected together. Mask penetration alone never selects a route. A named "
-            "hypothesis may be calculated before support exists, but its support must be assessed. "
-            "Assuming away near-field exposure merely to fill distance coverage is not justification.")
+            "The scenario explicitly selects continuous_unmasked_jet for background plus local jet, "
+            "or negligible_near_field for spatially uniform risk. There is no calculator default. "
+            "Calculation proposals cannot change the scenario selection. Mask penetration does not select a route.")
     return record
 
 

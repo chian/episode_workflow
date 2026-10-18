@@ -76,16 +76,12 @@ def main_calculation_inputs(ledger, subject):
 
 
 def resolve_calculation_inputs(action, ledger, requested_metrics=()):
-    """Resolve actual inputs before model review and again before execution."""
+    """Bind numeric inputs and model conditions from the registered scenario."""
     subject = action.get("subject")
     definition = ledger.scenarios.get(subject)
     if definition is None:
         raise ValueError("Calculations require a reviewed scenario")
-    conditions = action.get("conditions", {})
-    if not isinstance(conditions, dict):
-        raise ValueError("Conditions must be named statements")
-    check_case_inputs(definition, {}, conditions)
-    action = {**action, "conditions": {**definition.get("fixed_conditions", {}), **conditions}}
+    action = {**action, "conditions": dict(definition.get("fixed_conditions", {}))}
     target = definition.get("role", "target") == "target"
     if target:
         action.pop("facts", None)
@@ -309,7 +305,8 @@ def output_support(estimate, field, facts, ledger, review, *, derived=False, sel
             "support_complete": complete, "model_review": review, "invalidated_dependencies": invalidated}
 
 
-def execute_tool(action, ledger, requested_metrics, *, review):
+def execute_tool(action, ledger, requested_metrics, *, review=None):
+    review = {} if review is None else review
     name = action.get("action")
     if name not in TOOLS:
         raise ValueError("Undeclared deterministic tool")
@@ -333,8 +330,7 @@ def execute_tool(action, ledger, requested_metrics, *, review):
     selection = selected_target_snapshot(ledger)
     selection_bindings = selected_target_bindings(facts, selection)
     if name == "calibrate_infectiousness":
-        # Reuse the parent's support judgment; it does not authorize execution.
-        result = derive_parameter(lambda _: review, action, facts, {})
+        result = derive_parameter(None, action, facts, {})
         calculation = calculation_record(name, subject, facts, support,
             {f.field: {"value": f.value, "unit": f.unit} for f in result.facts},
             conditions=conditions, basis=action["basis"], operator=action["operator"],

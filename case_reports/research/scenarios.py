@@ -24,6 +24,11 @@ class Scenario:
     variables: tuple = ("exposure_time_s", "neighbor_distance_m")
     basis: str = "Caller-defined case conditions, not empirical evidence or computed answers."
 
+    def __post_init__(self):
+        near_field = {"continuous_unmasked_jet", "negligible_near_field"}.intersection(dict(self.conditions))
+        if len(near_field) != 1:
+            raise ValueError("Scenario conditions must explicitly select exactly one of continuous_unmasked_jet or negligible_near_field")
+
     def as_record(self):
         from .scenario_sharing import needed_fields
 
@@ -73,7 +78,8 @@ def _paper_cases():
                     "One infectious occupant; assess steady background and initially clean-room regimes explicitly.",
                     fixed,
                     (("well_mixed", "Spatially uniform background concentration in the selected case."),
-                     ("single_infectious_source", "One continuously present infectious source.")),
+                     ("single_infectious_source", "One continuously present infectious source."),
+                     ("continuous_unmasked_jet", "Include the local continuous-jet contribution in this scenario.")),
                     ("breathing_flow_m3_s", "quanta_concentration_exhaled_m3", "relative_transmissibility",
                      "deactivation_rate_s", "effective_radius_m") + (("mask_penetration",) if masked else ()),
                     variables=(),

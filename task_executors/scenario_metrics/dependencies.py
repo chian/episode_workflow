@@ -33,7 +33,6 @@ PARAMETER_DERIVATIONS = (
     Derivation("removal_capacity_m3_s", ("ventilation_flow_m3_s", "recirculation_flow_m3_s",
                "filter_efficiency", "deactivation_rate_s", "room_volume_m3", "settling_speed_m_s", "floor_area_m2"),
                "Q+pf*Qr+lambda_v*V+vs*A", lambda q, qr, pf, lv, v, vs, a: q+pf*qr+lv*v+vs*a),
-    Derivation("removal_capacity_m3_s", ("removal_rate_s", "room_volume_m3"), "lambda*V", lambda r, v: r*v),
     Derivation("removal_rate_s", ("removal_capacity_m3_s", "room_volume_m3"), "Qeff/V", lambda q, v: q/v),
 )
 DERIVED_NAMES = frozenset(d.output for d in PARAMETER_DERIVATIONS)
@@ -51,7 +50,7 @@ def fixed_input_fields(available, conditions=()):
     fields, conditions = set(available), set(conditions)
     while True:
         derived = {d.output for d in PARAMETER_DERIVATIONS
-                   if set(d.inputs) <= fields and set(d.conditions) <= conditions}
+                   if set(d.inputs) <= fields}
         if derived <= fields:
             return fields
         fields.update(derived)
@@ -130,7 +129,7 @@ def input_requirements(names, available=(), conditions=(), variables=()):
             required = tuple(dict.fromkeys((*route["inputs"],
                 *(c["field"] for c in route.get("parameter_constraints", ())))))
             route["missing_inputs"] = [f for f in required if f not in available]
-            route["missing_conditions"] = [c for c in route["conditions"] if c not in conditions]
+            route["missing_conditions"] = []
             for dependency in (*required, *route["conditions"]):
                 visit(dependency)
 

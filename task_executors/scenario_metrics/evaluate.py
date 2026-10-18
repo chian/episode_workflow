@@ -157,17 +157,14 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
         return {"input_fields": sorted(fields), "condition_fields": sorted(required)}
 
     def derive(name, inputs, formula, function, required_conditions=()):
-        if set(required_conditions) - set(conditions):
+        # Bound inputs and results already computed in this call are reused.
+        if name in values:
             return
         if all(k in values for k in inputs):
             answer = function(*(values[k] for k in inputs))
-            if name in values:
-                if not math.isclose(answer, values[name], rel_tol=0.02, abs_tol=1e-12):
-                    raise ValueError(f"Inconsistent {name}: supplied={values[name]:.8g}, {formula}={answer:.8g}")
-            else:
-                values[name] = answer
-                derivations[name] = {"inputs": list(inputs), "formula": formula, "value": answer}
-                dependencies[name] = derived_dependencies[name] = trace(inputs, required_conditions)
+            values[name] = answer
+            derivations[name] = {"inputs": list(inputs), "formula": formula, "value": answer}
+            dependencies[name] = derived_dependencies[name] = trace(inputs, required_conditions)
 
     for _ in range(len(PARAMETER_DERIVATIONS) + 1):
         before = len(values)
@@ -187,7 +184,7 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
     def compute(name):
         if name in outputs:
             return outputs[name]
-        if name not in METRICS:
+        if name in values or name not in METRICS:
             metric_dependencies[name] = trace((name,))
             if name not in values:
                 return {"status": "missing_inputs", "missing": [name],
@@ -209,7 +206,7 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
             if field in values and not accepts(values[field], constraint["value"]):
                 return exclude(constraint["reason"], {field: values[field]})
         needed = metric_conditions(name, regime=m.regime)
-        row["missing"] = [f"condition:{c}" for c in sorted(needed - set(conditions))]
+        row["missing"] = []
         args = {}
         conditional = name in CONDITIONAL_INPUTS and "exposure_time_s" in variables
         inputs = conditional_inputs(name, regime=m.regime) if conditional else m.inputs
@@ -255,7 +252,7 @@ def evaluate_parameters(parameters, conditions, metrics, *, subject, label, prov
                 near_field = row["near_field"]
                 binding = {"family": row["model_family"], "background": background, "near_field": near_field,
                            "parameters": {field: args[field] for field in model_inputs(background, near_field)},
-                           "conditions": {field: conditions[field] for field in sorted(needed)}}
+                           "conditions": {field: conditions[field] for field in sorted(needed) if field in conditions}}
                 row["model_id"] = hashlib.sha256(json.dumps(binding, sort_keys=True, allow_nan=False).encode()).hexdigest()
                 row["model_binding"] = binding
                 row["fixed_inputs"] = {field: {"value": args[field], "unit": UNITS[field]}
