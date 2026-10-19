@@ -1,0 +1,1579 @@
+AUDITING AN EPISODIC METHOD_LOOP SYSTEM
+
+The central invariant
+=====================
+
+Actual progress, recorded state, information given to the responsible episode,
+and credit must describe the same work. Continuation must use the observations
+defined by the system's rules.
+
+This document explains how to inspect that invariant. The examples include the
+relevant code, the meaning of its inputs, a concrete execution trace, and the
+effect of the correction. Sample inputs are labeled as illustrations. Statements
+about recorded execution are distinguished from behavior established by code.
+
+Read each example as a procedure to examine in your own application. A scientific
+quantity in an example is just one kind of task data. The same errors can occur
+in retrieval, writing, classification, coding, planning, or analysis.
+
+An audit establishes what the system does and whether that behavior is authorized.
+It does not grant permission to add reviews, gates, thresholds, budgets, retries,
+logs, or stopping rules. An unanswered question remains a question.
+
+Essential definitions
+======================
+
+Episode
+  An iterative decision process with a goal, scope, available actions and a
+  defined return contract. It chooses an action, receives its outcome, and can
+  revise its next choice. Its choices are not a guaranteed sequence of stages.
+
+Root, parent and child
+  Root owns the whole task. A parent delegates a defined question to a child.
+  The child owns its internal choices within that delegation. Information from
+  the child informs the parent's next choice; it does not authorize the child
+  to issue unrestricted instructions to the parent.
+
+Binding, runtime, executor and controller
+  The binding connects task data and actions to the episode machinery. The
+  runtime schedules work and records transitions. An executor performs a selected
+  operation. A controller applies the defined continuation rule to an episode's
+  observations. A function written in Python may call an LLM; its language does
+  not establish who generated the content it returns.
+
+Deterministic operation and LLM judgment
+  A deterministic operation applies specified rules to its inputs. An LLM
+  judgment generates content from a prompt. JSON validation can constrain an LLM
+  response without making the judgment deterministic. Trace generation, copying,
+  validation and communication separately.
+
+Action, model call and observation
+  An action is one piece of work selected by an episode. A delegated action can
+  contain an entire child episode and many model calls. An observation is one
+  input to that episode's continuation controller. Ten calls inside a child do
+  not automatically constitute ten observations at its parent.
+
+Candidate, selected record and committed state
+  A candidate is a retained alternative. A selected record is the alternative
+  chosen by the task's defined selection rule. Committed state is the authority
+  used for subsequent work and credit. Retaining a candidate does not give an
+  executor permission to choose it instead of the selected record.
+
+Contribution and credit
+  A contribution is recorded task progress. Credit projects specified contributions
+  from that state. It is not a count of effort or persuasive descriptions. A
+  progress denominator must say what independent requirements it counts.
+
+Refresh and observation
+  A refresh updates live credit after shared state changes. An observation records
+  an episode's completed action in its controller history. These are different
+  events, particularly when a parent is waiting for a child.
+
+Fresh and stale
+  A result is fresh when the dependencies defining it still match current state.
+  A stale result was completed but needs updating after a relevant change. A new
+  opinion about unchanged inputs is not itself a new numeric input.
+
+Assessment, gate and contract check
+  An assessment produces a judgment or score. A gate prevents work, registration,
+  use, credit or completion. A contract check enforces an authorized interface,
+  such as requiring a referenced record to exist. A relevance score is not
+  automatically an acceptance threshold. Trace its consumers to find its effects.
+
+Termination and completion
+  Termination means execution ended. Completion means the authorized task was
+  fulfilled. A checkpoint can finish recording an unsuccessful result. A process
+  can exit after saturation, failure or interruption. State the actual condition.
+
+Structured parent communication
+  The parent receives declared semantic fields with defined types and meanings.
+  An unrestricted paragraph inside a JSON string remains freeform communication.
+  Required fields should be collected by the existing work call and projected
+  from its records, without another prose-generation call.
+
+Active state and examination history
+  Active state is needed for current decisions, dependencies and credit. Closed
+  history may be retained on disk for examination. Releasing a closed child tree
+  must preserve its committed contributions and the information its parent needs.
+
+
+PART ONE: WHO IS ALLOWED TO DECIDE WHAT?
+=======================================
+
+1. Trace every requirement to its authority
+
+For each review, gate, threshold, default, retry, stopping rule and completion
+criterion, state the actual instruction or design decision authorizing it.
+
+- Distinguish an explicit requirement from an implementer's interpretation.
+- Words such as reliable, supported or complete do not authorize approval layers.
+- A document calling a mechanism mandatory or approved does not establish approval.
+- Identify conflicts between current instructions and historical descriptions.
+
+Ask: What requires this behavior, and does the implementation exceed it?
+
+2. Preserve episode ownership
+
+Each episode needs a defined goal, scope, actions and information contract.
+
+- The episode chooses within its scope; the runtime executes selected work.
+- The controller applies the defined continuation rule.
+- Children perform delegated work and return the declared information.
+- Infrastructure must not silently substitute, expand or cancel an episode's action.
+
+Ask: Who owns this decision, and who actually makes it?
+
+3. Preserve the episodic structure
+
+An episode is an iterative decision process, not a function with an episode label.
+
+- Later choices receive earlier outcomes and child returns.
+- The episode can revise its approach within its authorized scope.
+- Do not prescribe a sequence unless it is required.
+- Do not create an episode for each ordinary operation or bypass the shared runtime
+  through a private nested loop.
+
+Ask: Does the declared ownership tree match the executed behavior?
+
+4. Give each mechanism one defined responsibility
+
+Distinguish contract validation, relevance assessment, execution, progress recording,
+credit projection, parent communication, continuation and completion reporting.
+
+- A relevance judgment must not silently become permission to execute.
+- Reporting must not invent task progress or impose accidental eligibility rules.
+- A mechanism may use helpers while retaining one coherent responsibility.
+
+Ask: Does the mechanism do its stated job, or quietly control another decision?
+
+5. Make configuration explicit and owned
+
+Identify who chooses each setting and which values the run actually uses.
+
+- Put defaults at the appropriate boundary and expose authorized overrides there.
+- Do not duplicate defaults or replace an exposed choice downstream.
+- Do not let episode-generated content override caller-owned settings without
+  explicit permission.
+
+Ask: Where was the setting chosen, and can another layer silently change it?
+
+WHEN AN EXECUTOR CANCELS THE EPISODE'S CHOSEN WORK
+=================================================
+
+Situation
+An episode chooses a numerical operation using values from the application's
+main input table. Its executor is supposed to perform that operation and return
+its result. Instead, the executor first asks a model to review the inputs. The
+review may contain invalid_evidence: a collection of input records the reviewer
+believes were copied incorrectly. staged holds records prepared for this action;
+merge adds records to it. evaluated=True marks the action as processed.
+source is the current episode's work-producing object, source.run.metrics lists
+the requested numerical outputs, and execute_tool invokes the selected operation.
+correct_input_records returns changed input records; it does not itself execute
+the requested operation.
+
+The deciding code was:
+
+    if review.get("invalid_evidence"):
+        staged.merge(correct_input_records(review["invalid_evidence"], correction_evidence, staged))
+        return staged.result(evaluated=True)
+    result = execute_tool(calculation_action, staged, source.run.metrics, review=review)
+
+The first return occurs before execute_tool. An executor could therefore return
+successfully without performing the operation the episode selected.
+
+For example, suppose the episode selects an output calculation and the reviewer
+flags one input. The executor changes that input record and returns. The parent
+receives the correction's records, but no result from the requested calculation.
+This is an illustration of the branch, not a claim that this particular input
+was encountered. A successful Python return and evaluated=True do not establish
+that the calculation happened. Only a corresponding result record can do that.
+A correction's progress effect must not be reported as calculation completion.
+
+The review had also acquired an apparent requirement in the instructions:
+
+    The calculation tools use local kernels. Their mandatory parent review assesses
+    scientific compatibility; a negative or unavailable judgment records unsupported
+    status without preventing execution.
+
+Calling a review mandatory does not establish who authorized it. Moreover, the
+prose did not disclose the cancellation path shown above. A negative judgment
+and an invalid-input correction may be separate branches; establish each one's
+actual effect rather than treating the general description as proof.
+
+The replacement executor was:
+
+    def calculation_leaf(source, proposal, staged, context):
+        """Execute the deterministic tool without a calculation model review."""
+        action = proposal["action"]
+
+        def calculate():
+            result = execute_tool(proposal, staged, source.run.metrics)
+            staged.merge(result)
+            return staged.result(evaluated=result.evaluated)
+
+        return source.leaf(calculate, action)
+
+Here proposal contains the selected operation, source.leaf schedules its leaf
+execution, and execute_tool performs it. The existing input-binding code remains
+responsible for reading the main table. No replacement reviewer is introduced.
+
+What to examine in another application
+Follow the selected operation into its executor. Find every return before the
+actual work call. Determine what records those returns contain, what the parent
+receives, and what contribution earns credit. A task involving editing or
+retrieval can have the same defect: a reviewer substitutes its own activity for
+the requested action. Removing this branch establishes a correction on this
+path; it does not establish that every other review or hidden gate is gone.
+
+
+WHEN A SETTING HAS TWO OWNERS
+============================
+
+Situation
+A scenario selects an exposure model. One alternative includes a local exhaled
+plume in addition to a uniform room background; the other omits the local term.
+Two categorical keys encode this choice: continuous_unmasked_jet selects the
+local-term route and negligible_near_field selects the uniform-only route.
+These keys select equations. They are not scientific-approval verdicts. Mask
+penetration is a separate numerical input and does not determine this choice.
+
+EXPOSURE_ROUTES maps an output name to two calculation implementations: index 0
+is the local-term variant and index 1 is the uniform-only variant. The old selector
+was:
+
+    if name in EXPOSURE_ROUTES:
+        if {"continuous_unmasked_jet", "negligible_near_field"} <= set(conditions):
+            raise ValueError("Jet and negligible-near-field hypotheses require separate parameterizations")
+        return EXPOSURE_ROUTES[name][1 if "negligible_near_field" in conditions else 0]
+
+If neither key is present, the final expression silently chooses index 0. Thus
+absence becomes a model choice. In addition, an episode's calculation proposal
+could contribute conditions that were merged with the registered scenario.
+The scenario and the proposing episode could both influence equation selection.
+
+The correction required the scenario to choose explicitly:
+
+    def __post_init__(self):
+        near_field = {"continuous_unmasked_jet", "negligible_near_field"}.intersection(dict(self.conditions))
+        if len(near_field) != 1:
+            raise ValueError("Scenario conditions must explicitly select exactly one of continuous_unmasked_jet or negligible_near_field")
+
+The executor then copied the scenario's registered conditions:
+
+    action = {**action, "conditions": dict(definition.get("fixed_conditions", {}))}
+
+Here definition is the registered scenario and action is the requested operation.
+The proposal interface stopped offering a conditions override. Built-in scenarios
+explicitly supplied their intended choice; new scenarios could explicitly choose
+the other route. The equation selector also stopped supplying an implicit default.
+
+Illustration: a scenario requesting the uniform-only route now carries that
+choice from registration to execution. The episode cannot silently substitute
+the local-term route in a calculation proposal. An omitted choice fails during
+scenario construction rather than becoming an unrecorded downstream assumption.
+
+This required-field check was authorized by a requirement that scenarios own
+and explicitly set the model choice. It does not authorize adding required
+switches elsewhere. Nor does it assess scientific support for the chosen route.
+
+What to examine in another application
+List each setting's owner and every writer. Compare the configuration the parent
+sees with the configuration the executor actually uses. Check whether defaults,
+proposal fields, merges, or downstream fallbacks can silently change it. Record
+actual settings in dependency identities when they affect results. Correcting
+ownership does not itself justify changing credit weights.
+
+
+WHEN A REQUEST COUNT OVERRIDES THE CHILD'S CONTINUATION RULE
+===========================================================
+
+Situation
+Each episode has a numerical continuation controller observing progress from
+its completed actions. A child may perform several model requests while doing
+one action. The parent nevertheless could propose child_model_calls: a positive
+integer limiting model requests throughout the child's entire subtree.
+
+The cap parser was:
+
+    def child_model_allowance(proposal):
+        if "child_model_calls" not in proposal:
+            return None
+        value = proposal["child_model_calls"]
+        if type(value) is not int or value <= 0:
+            raise ValueError("child_model_calls must be a positive integer operational allowance")
+        return value
+
+The runtime converted that value into an inherited deadline:
+
+    owner = self.sources[parent.goal.goal_id]
+    allowance = child_model_allowance(proposal)
+    deadline = owner.model_call_deadline
+    if allowance is not None:
+        deadline = min(deadline, self.model_calls + allowance)
+
+self.model_calls counts model requests across the run. The child's source then
+contained this branch before producing further work:
+
+    if self.run.model_calls >= self.model_call_deadline < self.run.limits.max_model_calls:
+        self.failure = "episode_model_call_budget_exhausted_not_scientific_convergence"
+        self.ledger.issues.append(self.failure)
+        return SourceEnd("source_failed")
+
+The parent model could therefore impose another stopping mechanism. Illustrate
+it with an initial request count 10, the owner's deadline 100, a run-wide maximum 1000,
+and child_model_calls=3. min(100,10+3) gives this child deadline 13. After three
+requests anywhere in its descendants, the count is 13 and 13>=13<1000 is true.
+The source ends even if the child has not finished one action. Its progress controller may have
+no observation supporting a stop. The returned category source_failed describes
+this separate execution failure; it does not establish low yield or completion.
+self.ledger.issues is a retained list of diagnostic strings, not a continuation
+controller. SourceEnd("source_failed") tells the runtime this work source has no
+next unit because it failed. The comparison and
+return above are the causal stopping path.
+
+The correction removed the local allowance, inherited deadline, and corresponding
+source-ending branch. Child creation became:
+
+    goal = EpisodeGoal.child(parent.goal, objective=objective,
+                             result_contract={"information": contract.as_record()})
+    return self.episode(grain, source, goal=goal, focus=(),
+                        contract=contract, proposal=proposal)
+
+The child now receives its objective and information contract without this
+parent-proposed request ceiling. Separate run-wide limits still existed. Their
+presence must be assessed independently; this change did not remove every budget.
+
+What to examine in another application
+Distinguish model requests, child actions, and parent observations. Enumerate
+all ways a work source can end before its controller chooses to yield. An
+explicitly authorized operational budget can be legitimate, but it must be
+identified as such and its exhaustion must not be described as task completion
+or evidentiary saturation. Check that already committed progress survives and
+that the responsible parent receives the specific failure.
+
+
+PART TWO: ONE OPERATION, ONE COHERENT IMPLEMENTATION
+====================================================
+
+6. Avoid redundant processes
+
+One operation should have one coherent implementation path.
+
+- Helpers can support that path without creating competing entry processes.
+- Do not repeat an unchanged judgment or add a second call to translate information
+  the existing call could return structurally.
+- Inspect duplicated registration, assessment, selection and reporting.
+- Check cache conditions before claiming two entry points always dispatch twice.
+- Look for conflicting rules applied to the same state.
+
+Ask: Is the same thing decided or recorded twice, and can the answers disagree?
+
+7. Define every assessment's meaning and consequences
+
+Each assessment output needs a definition, consumers, and permitted effects on
+state, credit and continuation.
+
+- Distinguish unused outputs, informational outputs and control outputs.
+- A confusing field is not necessarily unused: follow every consumer.
+- Do not allow vague verdicts to acquire accidental effects across the system.
+
+Ask: Where is each field read, and what happens because of it?
+
+8. Audit each gate and threshold individually
+
+For a condition that blocks work or rejects a result, state its exact trigger
+and authorization.
+
+- Distinguish representation, reference, mathematical and inferred quality checks.
+- Determine whether it blocks one component or the whole operation.
+- Preserve valid partial contributions and return actionable feedback.
+- A legitimate contract check must not conceal an unrelated approval requirement.
+
+Ask: Why may this condition prevent progress?
+
+WHEN DUPLICATED FORMULAS CREATE AN UNREQUESTED COMPARISON GATE
+============================================================
+
+Situation
+The executor's values dictionary contains numerical inputs and intermediate
+results. It computes an effective clean-air flow Qeff from outdoor airflow Q,
+recirculated airflow Qr, filter removal fraction pf, biological deactivation rate
+lambda_v, room volume V, settling speed vs, and floor area A. The formula is:
+
+    Qeff = Q + pf*Qr + lambda_v*V + vs*A
+
+Q, Qr and Qeff have units of cubic metres per second; lambda_v has units of
+inverse seconds, V cubic metres, vs metres per second, and A square metres.
+The overall first-order removal rate lambda is Qeff/V, in inverse seconds.
+
+The derivation registry contained two recipes for Qeff and the reverse recipe:
+
+    Derivation("removal_capacity_m3_s", ("ventilation_flow_m3_s", "recirculation_flow_m3_s",
+               "filter_efficiency", "deactivation_rate_s", "room_volume_m3", "settling_speed_m_s", "floor_area_m2"),
+               "Q+pf*Qr+lambda_v*V+vs*A", lambda q, qr, pf, lv, v, vs, a: q+pf*qr+lv*v+vs*a),
+    Derivation("removal_capacity_m3_s", ("removal_rate_s", "room_volume_m3"), "lambda*V", lambda r, v: r*v),
+    Derivation("removal_rate_s", ("removal_capacity_m3_s", "room_volume_m3"), "Qeff/V", lambda q, v: q/v),
+
+Each Derivation stores its output key, input keys, descriptive formula, and
+function. The evaluator visited available recipes repeatedly until no new values
+were added. It recomputed even when an output already existed:
+
+    answer = function(*(values[k] for k in inputs))
+    if name in values:
+        if not math.isclose(answer, values[name], rel_tol=0.02, abs_tol=1e-12):
+            raise ValueError(f"Inconsistent {name}: supplied={values[name]:.8g}, {formula}={answer:.8g}")
+
+name is the output key and inputs lists its operands. The test accepts a difference
+up to two percent of the larger absolute number, or the absolute tolerance of
+10^-12. This compares two representations of the same quantity; it is neither
+a relevance score nor a numerical solver's stopping tolerance. Illustrative
+values 100 and 103 fail the comparison. To reach that branch through the displayed
+recipes, use this complete illustrative initial dictionary for their operands:
+
+    {
+      "ventilation_flow_m3_s": 100,
+      "recirculation_flow_m3_s": 0,
+      "filter_efficiency": 0,
+      "deactivation_rate_s": 0,
+      "room_volume_m3": 100,
+      "settling_speed_m_s": 0,
+      "floor_area_m2": 1,
+      "removal_rate_s": 1.03
+    }
+
+The old interface allowed the rate as a supplied value. The first capacity recipe
+computes 100+0+0+0=100 and stores it. The second capacity recipe then computes
+1.03*100=103. The difference 3 exceeds 0.02*103=2.06, so it raises ValueError before
+the reverse-rate recipe executes. This is an illustrative reachable path; no
+saved execution supplying this dictionary is claimed.
+
+The exception's word supplied is misleading: values[name] could have been
+computed earlier in this same evaluation. Copying values between tables need not
+have changed anything. The duplication and comparison themselves introduced
+the possibility of rejecting work before requested outputs were evaluated.
+
+The correction removed the second Qeff recipe and reused existing entries:
+
+    if name in values:
+        return
+    if all(k in values for k in inputs):
+        answer = function(*(values[k] for k in inputs))
+        values[name] = answer
+
+With that same dictionary, the corrected evaluator adds capacity 100 through the
+one remaining recipe and preserves the already supplied rate 1.03. It does not
+claim those independently supplied numbers obey every relation. When rate is to
+be computed, it belongs in calculation tracking rather than the independently
+supplied input list. The shown correction removes duplicate work and an
+unrequested acceptance comparison; it does not repair an arbitrary inconsistent
+input dictionary or establish cross-call freshness.
+
+What to examine in another application
+For any claimed inconsistency, enumerate every writer and recipe before proposing
+a tolerance. Establish whether alternate computation paths are authorized. A
+retry with the same dictionary and formulas cannot resolve this deterministic
+exception. Removing a comparison must be accompanied by coherent ownership of
+which value the operation uses, rather than another silent selection mechanism.
+
+
+WHEN POSTPROCESSING DELETES A SUCCESSFUL ANSWER
+=============================================
+
+Situation
+A selected operation solves for a distance in metres. m.function is its numerical
+implementation, args contains its operands, answer is its return value, and row
+is the result record. near_field is the scenario's local-plume model choice.
+The numerical function had already returned before this result-handling code:
+
+    answer = m.function(args)
+    if math.isnan(answer) or answer < 0:
+        raise ValueError("Nonphysical or undefined result")
+    row.update(status="calculated", value=answer if math.isfinite(answer) else None,
+               limit="finite" if math.isfinite(answer) else "unbounded")
+
+A later branch then imposed a ten-centimetre cutoff:
+
+    if near_field == "jet" and 0 < answer < 0.1:
+        row.update(value=None, limit=None)
+        return exclude("The algebraic boundary is below the 0.1 m jet domain.",
+                       {field: args[field] for field in inputs})
+
+inputs lists the operation's operand keys. exclude changed the record again:
+
+    row.update(status="inapplicable", missing=[], applicability={"reason": reason, "inputs": inputs})
+    return row
+
+Illustrate the transformation with answer=0.05: arithmetic returns five
+centimetres; the row first records calculated and 0.05; postprocessing replaces
+the number with None and labels the operation inapplicable. No inputs are
+missing. The cutoff is a software policy, not the equation's returned number.
+The requested contract was numerical output or a specific execution error,
+without an additional minimum-distance approval rule.
+
+Saved results also demonstrated the branch's occurrence: six calculation records
+contained status="inapplicable", value=null, missing=[], and the exact reason
+"The algebraic boundary is below the 0.1 m jet domain." These retained fields
+establish that answers were suppressed; they do not reveal the deleted numerical
+answers or establish that any was exactly the illustrative 0.05 metres.
+
+The correction deleted the cutoff branch and retained the numerical result
+written by the first code block. It also removed the corresponding distance
+restriction from the numerical wrapper and the tool's advertised constraints.
+Leaving those consumers unchanged would continue discouraging or rejecting the
+same operation elsewhere. An earlier version had merely attached a warning at
+this point; changing that warning into exclusion had changed execution semantics.
+
+What to examine in another application
+Trace successful output through wrappers, postprocessing, persistence, parent
+communication, and credit projection. Find any step that replaces completed work
+with an unavailable status. Determine the authority for that exact rule. Remove
+a revoked rule through all of its consumers; do not infer from one corrected
+branch that every gate is gone or that the model is scientifically valid for
+all inputs. Preserve genuine interface and mathematical checks only according
+to the task's actual contract.
+
+
+PART THREE: STATE, PROGRESS AND CREDIT MUST AGREE
+=================================================
+
+9. Maintain one authoritative state
+
+Define where committed facts, results, selections, decisions and progress live.
+
+- Make meaningful proposed, executing, returned and committed transitions explicit.
+- Derived views project authoritative state; they do not choose competing truth.
+- Retained alternatives must not silently become execution choices.
+- Prevent stale snapshots from overwriting newer shared records.
+
+Ask: If two views disagree, which record is authoritative, and why?
+
+10. Preserve provenance and semantic identity
+
+Retain what each contribution represents and how it was obtained.
+
+- Distinguish user inputs, observations, estimates and deterministic results.
+- Keep the task's target separate from the context supplying data.
+- Validate identities and relationships against records available at that boundary.
+- Do not confuse an identifier with its semantic meaning or use unstable positions.
+
+Ask: Can the contribution be traced through the system without changing meaning?
+
+11. Make credit reflect recorded progress
+
+Define the goal-relevant contributions and weights; do not score activity or rhetoric.
+
+- Distinguish inherited progress from new gains.
+- Prevent duplicate credit for repeated records, renamed work and shared copies.
+- Define the eligible scope and denominator before interpreting coverage.
+- Children cannot expand their targets merely by naming new topics.
+- Track different kinds of progress separately when they have different meanings.
+
+Ask: What changed in task state to justify the credit change?
+
+12. Make credit decreases explainable
+
+Identify the exact contribution and relevant dependency that ceased to be current.
+
+- Distinguish lost progress from an incomplete subsequent action.
+- Do not erase completed work merely because a later assessment failed.
+- Distinguish historical work from its current contribution.
+- Do not clamp scores upward to hide genuine corrections.
+
+Ask: What was lost, and does the decrease match it?
+
+13. Link shared progress to the right episodes
+
+If shared progress exists, update affected episode inputs and ancestor credit
+according to the defined projection.
+
+- A suspended parent need not wait for child closure to see committed progress.
+- Preserve local ownership and information contracts.
+- A score refresh must not fabricate completed-action observations.
+
+Ask: Does the episode that needs to act see the change and its corresponding credit?
+
+14. Keep credit refreshes separate from yield observations
+
+Shared state changes, completed own actions and controller observations are distinct.
+
+- One long child investigation can constitute one parent action.
+- Inspect nested-work accounting and the observation boundary.
+- Do not synthesize history from refreshes or lose the gain when the real action returns.
+- Make the treatment of failed operations explicit.
+
+Ask: What constitutes one observation at this episode level?
+
+15. Reuse work according to actual dependencies
+
+Define what determines freshness and reuse results while those dependencies match.
+
+- Invalidate only affected contributions when defining dependencies change.
+- Do not invalidate for unrelated metadata, explanatory wording or a new opinion.
+- Do not repeatedly compute or reassess unchanged work without a defined reason.
+- Keep freshness separate from quality judgments.
+
+Ask: Which dependency changed, and why does that require doing the work again?
+
+16. Synchronize communication, progress and credit
+
+For each contribution, internal state, the owner's decision inputs, progress
+reporting and credit must describe the same work.
+
+- Later changes must update all affected views consistently.
+- A score change, table update or successful return alone is not integration proof.
+
+Ask: Can all four components tell the same story about this contribution?
+
+Execution must use the same state that the episode sees
+----------------------------------------------------
+
+Situation. A research application collects several possible values for a
+quantity. It retains those alternatives with their provenance, but its main
+table identifies the current value for the target case. The user required
+calculations to use that table. Keeping alternatives was useful for examination;
+it did not authorize the calculation request to select different operands.
+
+Before, the executor constructed an options dictionary. Each key identified a
+stored candidate. A request's `facts` list chose keys from that dictionary:
+
+    keys = action.get("facts")
+    facts = tuple(options[k] for k in keys)
+
+Here `action` is the operation request, `options` maps candidate identifiers to
+typed values, and `facts` becomes the tuple of operands passed to execution.
+Validation checked that identifiers existed and that the same quantity was not
+supplied twice. Those checks did not require the selected candidate to match the
+main table.
+
+For example, suppose two valid records describe the same target quantity: an
+older estimate of 0.20 and the current main-table value of 0.35. If a request
+names the older record, the executor receives 0.20. No number changes during
+copying. The error is that the request selects a different stored number. A
+parent can therefore see progress and readiness for one input set while the
+executor calculates with another.
+
+After, the target-case path removed request-supplied operand selection:
+
+    action.pop("facts", None)
+    action.pop("source_inputs", None)
+    facts = main_calculation_inputs(ledger, subject)
+
+`ledger` holds the committed records. `subject` identifies the requested target
+case. `main_calculation_inputs` reads that target's selected table rows and binds
+each found field to its recorded value and unit. It supplements absent fields
+with current calculated inputs; it does not replace a selected table value with
+a candidate chosen by the request. The decisive selection in that helper is:
+
+    for (target, field), row in selected_target_snapshot(ledger).items():
+        if target != subject or not row.get("found") or field in bound:
+            continue
+        assumption = ledger.assumptions[row["selected_assumption_key"]]
+
+`selected_target_snapshot` is the projection of the main table. `bound` is a
+dictionary of operands already bound for this operation. Each surviving row
+supplies its own `value`, `unit`, and provenance to the operand record. `assumption`
+is that row's selected input record; its identity and rationale supply provenance,
+not a second numeric choice. Caller-supplied fixed values and retained defaults
+bind first, found values fill missing fields, and current calculated values fill
+fields still absent.
+
+State effect: the alternative records remain stored, while execution reads the
+authoritative selection. Communication effect: the episode-visible selected
+value and the actual operand describe the same contribution. Credit effect:
+this binding change awards no points itself; it makes calculations correspond
+to the input progress already credited. Controller effect: it adds no stopping
+rule and makes no decision about which operation the episode should request.
+
+The code establishes that the old interface permitted divergent selection. It
+does not, by itself, establish that a particular historical result used the
+wrong candidate.
+
+Audit your system by tracing the actual operand constructor. Do not stop at a
+correctly populated dashboard. Look for a second selector downstream of it.
+
+
+A returning child must not overwrite newer shared work with its inherited copy
+--------------------------------------------------------------------------
+
+Situation. An episode starts with a copy of shared state. Descendants can commit
+newer records before that episode returns. A returned result contains both the
+episode's real changes and unchanged records inherited at its start.
+
+Before, the return path committed the whole result:
+
+    global_status = self.run.global_goal.commit(self.pending)
+
+`self.pending` was the returning episode's accumulated result. `commit` merged
+its records into the authoritative shared ledger. The problem was not that
+every whole-result merge necessarily lost data. The problem was that an
+unchanged inherited record could be presented as if it were a new contribution.
+
+Consider an episode that inherited a value of 10. A descendant later commits 12
+for the same record identity. The episode then completes unrelated work and
+returns its unchanged inherited 10. If the merge accepts the returning record,
+the value can revert to 10. In this implementation the actual merge used dictionary replacement:
+
+    self.assumptions.update((a["key"], a) for a in result.assumptions)
+
+The stable key identifies a record slot. update overwrites that slot without
+checking whether the returning record is newer. Thus, under the illustrated
+same-key inputs, committing the inherited 10 would replace the newer 12. No saved
+overwritten record is asserted; this is a concrete trace of the executable rule.
+
+After, a helper selected only records changed relative to a defined baseline.
+For one collection, its decisive expressions were:
+
+    previous = {key(row): row for row in getattr(inherited, name)}
+    changes[name] = tuple(row for row in records
+                          if key(row) not in previous or previous[key(row)] != row)
+
+`name` identifies a collection of records. `key(row)` returns the stable identity
+for that collection, such as a parameter-record key. `inherited` is the result
+received at the episode's start. `records` contains its returning records.
+The helper gathers these changed collections into a result of the same shape.
+An unchanged copy of 10 is excluded; a genuine edit or new record is included.
+
+The projection first used current shared state as its working baseline:
+
+    working = Ledger(committed)
+    working.merge(changed_records(self.pending, inherited))
+
+`committed` is the current shared result, which already includes the newer 12.
+`Ledger` is the mutable record container. `changed_records` performs the
+identity-and-equality comparison just explained. The result to commit was then
+expressed as changes relative to current shared state:
+
+    self.pending = working.result(evaluated=self.pending.evaluated,
+                                  stop_reason=self.pending.stop_reason)
+    self.pending_global = changed_records(self.pending, committed)
+
+working.result turns the merged ledger back into the returning result.
+evaluated and stop_reason retain the action's evaluation and termination fields;
+they do not select numeric values. In the illustration, working contains 12,
+self.pending therefore contains 12, and comparing it with committed 12 contributes
+no change for that record. The unrelated new work remains in the delta.
+
+State effect: an unchanged inherited record no longer competes with newer shared
+state merely because a child returns later. Communication and credit must be
+projected from the resulting current state and real changes. An inherited copy
+is neither a newly found value nor an additional completed operation. The
+controller still receives one observation for the parent's completed action.
+
+This is protection against stale inherited writes, not a complete concurrent
+conflict policy. Two episodes genuinely editing the same record still need
+defined merge semantics. The historical correction demonstrates the structural
+hazard; it does not prove a particular saved record was overwritten.
+
+Audit your system by distinguishing inherited records from newly changed
+records at every child return. Check record identity, comparison baseline, merge
+order, and what the parent actually receives after shared changes are applied.
+
+
+Count independent inputs separately from supplied defaults and completed work
+----------------------------------------------------------------------------
+
+Situation. A system reported progress as "values found / values needed." Its
+required-field construction walked dependencies of the requested outputs. That
+walk could encounter both independently supplied inputs and quantities computed
+by available operations. Without an explicit distinction, both could enter the
+denominator advertised as values to find.
+
+For example, effective removal capacity can be computed from airflow, filter
+efficiency, room geometry, and other supplied inputs. Counting it as another
+independent literature value confuses obtaining inputs with doing the work.
+A retained supplied constant causes the same accounting problem: it is already
+available and is not a missing discovery.
+
+The corrected required-field expression was:
+
+    return ((declared | (dependencies & UNITS.keys()))
+            - fixed_input_fields(fixed, conditions) - conditions.keys()
+            - set(outputs) - set(scenario.get("calculation_variables", ()))
+            - CALCULATED_PARAMETER_FIELDS)
+
+These are sets of field names. | combines sets, & intersects them, and - removes
+members. declared contains the case's explicitly named input needs; dependencies
+contains the fields its outputs require; UNITS lists registered numeric fields.
+fixed_input_fields returns supplied values and quantities obtainable from them;
+conditions holds supplied model settings; outputs holds the requested products;
+calculation_variables names values the operation solves for. The final subtraction
+excludes the separately tracked calculated fields.
+
+That set contained these four quantities:
+
+    "quanta_emission_rate_s", "settling_speed_m_s",
+    "removal_capacity_m3_s", "removal_rate_s"
+
+They mean, respectively, infectious emission per second, particle settling speed
+in metres per second, effective removal capacity in cubic metres per second,
+and total removal rate per second. These quantities still mattered. Their work
+belonged in calculation tracking rather than independent-input discovery.
+
+The same construction included retained defaults among available fixed values:
+
+    fixed = {**retained_defaults(scenario), **scenario.get("fixed_parameters", {})}
+
+`scenario` is the caller's case definition. Its fixed parameters override retained
+defaults when both specify the same field. `retained_defaults` includes only
+defaults explicitly marked for retention:
+
+    return {field: row for field, row in scenario.get("model_defaults", {}).items()
+            if row.get("decision") == "retain"}
+
+A planning decision can instead make a default a case-dependent unknown. Such a
+value is then not silently excluded. Sharing decisions group remaining needs
+that require the same independent value. Four case rows sharing one input do
+not automatically become four discoveries.
+
+A concrete accounting illustration: two rooms need breathing flow, mask
+penetration, volume, gravity and removal capacity. Volumes are supplied; gravity
+is retained at its default; removal capacity is calculated. Both rooms have the
+same breathing activity but different face coverings. If the registered sharing
+judgment groups breathing flow together and separates the two mask values, the
+discovery denominator is 1+2=3. It is not five quantities times two rooms. Computing
+removal capacity belongs to calculation progress. This describes the set logic,
+not a claimed observed sharing decision.
+
+The other end of the path also needed attention. Storing a source observation
+is insufficient when the requirement is automatic main-table progress. The
+corrected projection collected valid numeric candidates, graded their
+source-to-target relevance, and projected them into the target table in the
+same path. The ranking and discovery expressions were:
+
+    selected = max(candidates, key=target_value_preference) if candidates else None
+    "discovery_points": 1.0 if candidates else 0.0
+
+`candidates` means valid numeric assignments to the independent target group.
+`target_value_preference` ranks their per-value relevance scores. It does not
+use a minimum relevance threshold to erase a found value. A better replacement
+changes selection; it does not earn a second discovery point for that group.
+
+A saved run demonstrated the end-to-end path: one extraction supplied two
+registered independent groups, progress changed from 0/19 to 2/19, and root
+credit rose from 12.5 to 14.5 before its investigation returned. This does not
+claim every extracted number always maps to a target need. It demonstrates
+automatic propagation of the two relevant groups rather than merely retention
+in an intermediate collection.
+
+Audit both ends: enumerate exactly what belongs in the denominator, then trace
+a value through registration, ranking, main-table selection, episode information,
+and credit. Keep completed operations in a separate progress category.
+
+
+Separate completed-work credit from review opinions and actual freshness
+-----------------------------------------------------------------------
+
+Situation. Two distinct review mechanisms affected completed numerical work.
+They require separate explanations because removing one did not remove the
+other.
+
+The first affected credit eligibility. The decisive completion predicate was:
+
+    return (review.get("admit") is True and review.get("completed", True) is True
+            and not dependency.get("invalidated_dependencies")
+            and (derived or output_meets_contract(output, record.get("output_contracts", {}).get(field)))
+            and _numerically_completed(record, field, derived=derived))
+
+record contains the completed operation, field names the output, dependency
+contains its input history, and derived distinguishes an intermediate from a
+requested output. output_meets_contract checks the requested output form;
+_numerically_completed checks that a numerical result exists. For the following
+illustration, all those ordinary completion checks are true and dependencies
+are unchanged. The separate review is {"admit":false,"completed":true}. Its first
+condition makes the whole predicate false. The old scorer treated that as no
+accepted completion and assigned zero base points.
+
+Here `review` was a scientific model-review judgment, not the calculator's
+success status. The old scoring code could therefore award zero to a completed,
+current numerical result because the reviewer had not accepted it. The result
+could remain stored while contributing no completion credit.
+
+The correction separated reusable-method credit and current-result credit:
+
+    method_credit = multiplier * REUSABLE_METHOD_CREDIT
+    current_result_credit = multiplier * CURRENT_RESULT_CREDIT if fresh else 0.0
+    points = method_credit + current_result_credit + support_credit
+
+Only numerically completed records reached this scoring block. `fresh` meant
+that the recorded dependencies remained current. For the application's chosen
+policy, method credit was 2.5, current-result credit was 10, and the multiplier
+for a requested endpoint was 2. Thus a current requested endpoint earned
+2 × 2.5 + 2 × 10 = 25 base points. A later input change could leave 5 points for
+completed method work while retracting the 20 current-result points.
+`support_credit` was a separate optional bonus. These weights describe this
+application's policy; another system must use its own authorized policy.
+
+The second mechanism affected freshness itself. A recorded premise identity
+contained its subject, quantity, value, unit, and statement. Review metadata was
+not part of that identity. Nevertheless, the old freshness check was:
+
+    if not assumption_matches(record, key, current) or current.get("review", {}).get("verdict") == "contradicted":
+        return False
+
+`record` is the completed calculation's dependency record. `key` identifies an
+input premise. `current` is that premise's current record.
+`assumption_matches` checks that the premise claim used by the calculation still
+matches the current claim. The extra `or` made a review opinion sufficient to
+declare the calculation stale even when the input claim had not changed.
+
+Consequences were concrete: status became `calculated_needs_updating`,
+current-result credit disappeared, and the result stopped being available as a
+current downstream input. That was not a display-only annotation.
+
+The corrected condition removed that separate opinion-based invalidation:
+
+    if not assumption_matches(record, key, current):
+        return False
+
+A genuine input change still requires recalculation. An unrelated opinion does
+not silently stand in for one. Other dependency checks remained; this excerpt
+does not define the entire freshness algorithm.
+
+The code establishes both mechanisms and their effects. No particular saved
+unchanged-input verdict transition is claimed here. The first credit correction
+did not establish that all review effects had disappeared: the second mechanism
+existed separately. Nor does either correction prove final reporting and
+acceptance no longer consult support. Each consumer must be examined.
+
+Audit the status, selected value and units, changed dependencies, current-result
+credit, retained-method credit, and downstream availability together. Credit
+loss needs a concrete contribution that ceased to be current. A completed
+operation should not vanish from history because a later operation failed.
+
+
+Refresh shared credit without inventing completed ancestor actions
+----------------------------------------------------------------
+
+Situation. A root episode delegates an investigation. The investigation commits
+useful work while the root remains suspended. Root credit should reflect that
+shared progress promptly. It must not pretend the root completed an action
+every time an internal child operation commits a record.
+
+The implementation distinguished `refresh` from `observe`. Both update credit
+information, but only an observation adds a completed own-action boundary to
+the episode's yield history. The decisive refresh implementation was:
+
+    if not value.evaluated:
+        return 0.0
+    previous = self._score()
+    self._qualities(value)
+    return self._score() - previous
+
+`value` is the updated credit projection; `evaluated` means that projection is
+available. `_qualities` updates the credit components from it. `_score` computes
+their current score. There is no append to action history in this function.
+
+By contrast, the own-action observation path includes:
+
+    self.history.append(score)
+
+The continuation estimator then evaluates that episode's observed history.
+Thus "refresh" means a current-score update, not another action observation.
+
+The runtime refreshed live ancestor controllers after committing shared work.
+In one saved run, the root gained 2 points while the investigation remained
+active. The root and intervening ancestors received the shared refresh; the
+investigation returned later. The code establishes that the refresh itself did
+not append a root observation. The saved event establishes that an ancestor
+score actually updated before child return.
+
+For a concrete walkthrough, suppose the root's last completed-action score was
+10. Its active child makes two contributions worth 1 each. The root's current
+score becomes 12 through refreshes; its action history does not acquire two
+fictional completed actions. When the investigation finally returns, its actual
+completion supplies the next root observation. The actual observation subtracts history[-1], the last completed-action score,
+from the new score. It therefore observes 12-10=2 and appends 12 once. Subtracting
+the already-refreshed live score would incorrectly produce 0; appending at every
+refresh would invent two parent actions. Neither behavior belongs at this boundary.
+
+State effect: the committed shared contribution is immediately authoritative.
+Communication effect: relevant live episodes can see it without waiting for
+branch closure. Credit effect: the ancestor's current shared score updates.
+Controller effect: no synthetic yield history is added by that refresh.
+This does not imply the estimator chooses which action to take next; the
+episode retains that decision.
+
+Audit the two call paths separately. Ask what event creates one observation at
+each episode level. Model calls, internal child actions, shared record commits,
+and completed parent actions are different events. A system can correctly
+refresh its score and still feed the wrong history to continuation control.
+
+
+PART FOUR: COMMUNICATION, FAILURE AND CONTINUATION
+===================================================
+
+17. Keep continuation control faithful to its definition
+
+Apply the configured rule to the appropriate episode history and credit projection.
+
+- No hidden stopping conditions or unauthorized budgets.
+- A yield estimator does not compare alternatives unless that is explicitly its job.
+- Audit root behavior separately from lower-level behavior.
+- Distinguish continuation choices from an operation that prevents execution.
+
+Ask: What exact condition ended the episode, and which component applied it?
+
+18. Distinguish termination from completion
+
+Separate goal fulfillment, numerical yielding, exhaustion of available work,
+operational failure, external interruption and any authorized budget exhaustion.
+
+- Execution ending does not establish task success.
+- Explain the causal condition, rather than naming the last action.
+- Final acceptance and runtime continuation are separate mechanisms to inspect.
+
+Ask: Was the task fulfilled, or did execution simply end?
+
+19. Make failures actionable
+
+Rejected work can be appropriate. Preserve valid partial contributions and
+return specific structured information to the owner of the next decision.
+
+- Identify affected inputs, outputs or relationships.
+- Do not swallow failures, relabel them success or replace them with vague prose.
+
+Ask: Can the responsible episode determine what it could change next?
+
+20. Make retries meaningful
+
+Distinguish transient external failures from deterministic failures.
+
+- A deterministic retry needs a relevant input, state, configuration or code change.
+- Record the relationship between attempts and keep retry accounting visible.
+- Do not repeatedly submit an unchanged invalid action or erase prior success.
+
+Ask: What changed that could change the result?
+
+21. Control child-to-parent communication
+
+The parent defines required information as typed semantic fields and relationships.
+
+- Collect those fields in the existing work call; no second prose-generation call.
+- No unrestricted findings paragraphs or direct child instructions.
+- Validate types, enums, identities and relationships, including final parent inputs.
+- Keep internal audit identities separate from task-data identities.
+- JSON syntax alone does not constrain an unrestricted string's meaning.
+
+Ask: What crosses this boundary, and how is its meaning constrained?
+
+22. Keep active state and examination history distinct
+
+Keep live decision, dependency and credit state; archive closed examination history.
+
+- Avoid duplicate retained child trees and ledger snapshots.
+- Preserve durable relationships and the parent's useful report when releasing memory.
+- Do not expand large archives merely to obtain small progress summaries.
+- Use existing reporting surfaces instead of multiplying logs and tables.
+
+Ask: Who still needs this object in active memory, and why?
+
+23. Remove mechanisms completely through their consumers
+
+Trace definitions, callers, prompts, schemas, persistence, parent communication,
+freshness, credit, continuation, reporting, closure and loaded legacy interfaces.
+
+- Remove consumers of deleted fields instead of inventing placeholder judgments.
+- Separate effects on execution, reporting, credit and final acceptance.
+
+Ask: Who still depends on the mechanism supposedly removed?
+
+24. Make verification claims proportional to evidence
+
+Distinguish code inspection, syntax/import checks, saved-record examination,
+authorized replay, startup, reaching the affected path and fulfilling the task.
+
+- None automatically establishes the later stages.
+- Respect constraints on tests, external requests and launches.
+
+Ask: What was actually verified, and what remains unverified?
+
+25. Report precisely
+
+Separate permitted code behavior, necessary effects under stated inputs,
+observed occurrences, illustrations and unresolved hypotheses.
+
+- Correct a conclusion when evidence changes it.
+- Establish whether an old example still exists before calling it current.
+- Do not invent plausible causes or agree with an interpretation before checking.
+
+Ask: Does the explanation contain enough information to reproduce its reasoning?
+
+PARENT COMMUNICATION: JSON CAN STILL CONTAIN AN UNCONTROLLED PARAGRAPH
+===================================================================
+
+A parent episode delegates a question. The child performs model-assisted work
+and stores structured facts, operations and failures. The parent needs those
+results for its next decision. In this implementation, receiving the child's
+work for state and credit was separate from producing its parent-facing message.
+ChildEpisodeUnit connects a child to two callbacks: receive handles the returned
+work records, while the third argument produces information for the parent.
+
+The original connection used this code:
+
+    def edge(self, child):
+        return ChildEpisodeUnit(child, self.receive, self.synthesize)
+
+The synthesis callback made an additional model request with these instructions
+and schema fields:
+
+    "operation": "synthesize_research_findings"
+
+    "Return one brief paragraph answering the parent's reporting contract. "
+    "Synthesize trends and consequential changes in understanding that help the parent "
+    "choose its next action. Mention uncertainty, contradictions or a failure's meaning "
+
+    "response_contract": {
+        "type": "object", "additionalProperties": False,
+        "required": ["findings"],
+        "properties": {
+            "findings": {"type": "string", "minLength": 1}
+        }
+    }
+
+These are excerpts of the actual request; other prompt fields are omitted. The
+schema restricts the key to findings but leaves its value as arbitrary prose.
+A request not to prescribe the parent's next action cannot structurally prevent
+such prose. JSON syntax alone does not establish controlled communication.
+
+Concrete walkthrough: a child has found one numerical value and failed to read
+another document. Those outcomes already exist. This callback asks a second
+model to characterize them. Its paragraph may omit the found value or describe
+the failed read as proof that further work is pointless. Neither assertion is
+validated merely by checking that findings is a nonempty string. This illustrates
+the allowed channel; an actual malicious paragraph was not established.
+
+The replacement connection and projection begin:
+
+    def edge(self, child):
+        return ChildEpisodeUnit(child, self.receive, self.parent_report)
+
+    def parent_report(self, result, completion=None, request=None):
+        """Project existing validated work records into a closed parent JSON return."""
+
+The projection copies numeric records using this actual loop:
+
+    for fact in delta.facts:
+        if fact.field not in quantities:
+            continue
+        parameters.append({**subject_refs(fact.subject), "parameter": fact.field,
+            "value_state": "numeric_value_returned", "value": number(fact.value),
+            "unit": unit(fact.field, fact.unit),
+            "origin": enum(fact.kind, {"source_observation", "source_model_parameter", "derived",
+                "model_assumption", "user_assumption", "model_default", "scenario_constraint", "request_constraint"}),
+            "relevance": relevance(fact.subject, fact.field, fact.key)})
+
+Here delta is changed work, each fact is a typed record with a named field,
+number and unit, quantities is the declared parameter catalog, and number accepts
+only finite numbers. subject_refs constructs source/target identities; unit checks
+the canonical unit; enum restricts origin to the listed categories; relevance
+reads the stored per-value relation. The other helpers project declared entity
+identities, units, origin categories and stored relevance. They do not ask
+another model to summarize. Returned information also includes operation and
+reading outcomes, so a failed read remains distinguishable from a successful
+read that produced no value.
+
+A complete small contract makes the distinction concrete. This teaching example
+illustrates the controlled design; it is not a verbatim execution transcript or
+a claim that every application needs these field names. The delegated task asks
+for a mask-penetration estimate and one document-reading attempt. Mask penetration
+is the dimensionless fraction passing through a face covering; 0.35 is the child's
+estimate. The assigned document is named B. A possible complete return is:
+
+    {
+      "parameter_results": [
+        {"parameter":"mask_penetration", "value":0.35,
+         "unit":"1", "origin":"model_assumption"}
+      ],
+      "operations": [
+        {"operation":"read_document", "document":"B",
+         "status":"failed", "failure_kind":"provider_failure",
+         "value_returned":false}
+      ]
+    }
+
+The parent declares these two arrays and the listed fields only. parameter must
+name a requested quantity; value is a finite number; unit is canonical; origin
+is a declared category, here an estimate. The operation and document identify
+the assigned attempt. failed means no usable reading response was obtained;
+provider_failure states the known failure class without claiming quota, timeout
+or memory as its cause. value_returned=false means that reading attempt returned
+no value; it does not erase the separate estimate in parameter_results.
+
+For a completed reading with no matching value, the operation instead contains
+status="completed", failure_kind=null and value_returned=false. That describes
+the assigned attempt, not whether the entire document contains useful material.
+The two cases can be distinguished from the fields alone. Neither return contains
+a findings paragraph, an instruction to stop, or a claim of overall task success.
+
+The earlier extraction can still be model-generated. Deterministic projection
+means that the boundary copies and constrains existing work; it does not mean
+that every copied fact originated in deterministic code. Credit continues to
+consume the child's actual result through receive. The parent completes one
+child action. Removing the extra request does not create another observation
+or additional credit.
+
+A second boundary mistake made a valid classification unusable. A model could
+choose type_id="new" to request a new group of comparable source events. Python
+then generated the stored group key like this:
+
+    if type_id == "new":
+        type_id = f"{self.goal.goal_id}:type:{next_number}"
+        next_number += 1
+
+The goal_id identifies the child invocation, not the source event. A separate
+parent-boundary rule forbade child audit identities in parent inputs. With
+child identity "goal-123", Python manufactured "goal-123:type:1"; copying the
+group into parent input necessarily violated that rule. The model had selected
+a permitted option. The deterministic naming rule created the conflict.
+
+The corrected construction uses domain content instead:
+
+    if type_id == "new":
+        type_id = "source_type:" + identity({
+            "source": source, "subjects": sorted(decision["subjects"]),
+            "description": decision["description"], "basis": decision["basis"],
+            "sequence": next_number,
+        })
+        next_number += 1
+
+decision contains the chosen subjects, description and classification basis;
+source identifies the document supplying the event; next_number distinguishes
+new groups. identity hashes that record. This removes the invocation identifier;
+it does not prove that the resulting key is a universal identity for the event.
+Audit who chose a semantic category, who constructed its stored identity, and
+who copied it to the parent separately.
+
+
+FAILURE CLASSIFICATION: AN UNCHANGED RETRY IS NOT NEW WORK
+=========================================================
+
+Constructing a model request can fail before dispatch. For example, the parent
+input validator can reject an embedded child invocation identity. Repeating
+request construction with unchanged state cannot repair that input.
+
+Originally the proposer handled both local construction defects and external
+provider errors using this branch:
+
+    except (ProviderError, ValueError, TypeError, KeyError, OSError) as exc:
+        result = self.failure_result(exc, "proposal")
+        return self.leaf(lambda: result, f"proposal_failure:{view.units_consumed}")
+
+ProviderError denotes an external model-service error. failure_result creates
+a structured failure with its stage and category. self.leaf packages that result
+as a work unit, and view.units_consumed counts this episode's completed units.
+A failure leaf is an operation returned to the runtime. On another iteration,
+the same invalid input could produce another failure leaf without any model
+having received a request. Incrementing an attempt counter changes neither the
+input nor the condition rejecting it.
+
+The correction recorded the model-call count before proposing and distinguished
+local failures. before_calls is the count captured before proposal construction;
+ParentModelInputError denotes invalid input assembled before dispatch; the ledger
+is the record store; replace creates a record with the updated diagnostic list:
+
+    if (isinstance(exc, ParentModelInputError) or
+            (isinstance(exc, (ValueError, TypeError, KeyError))
+             and not isinstance(exc, (ProviderError, OSError))
+             and self.run.model_calls == before_calls)):
+        self.failure = "invalid_parent_model_input"
+        failure = self.failure_result(exc, "parent_model_input")
+        self.ledger.merge(replace(failure, diagnostics=tuple(
+            self.run.identify_diagnostic(d) for d in failure.diagnostics)))
+        return SourceEnd("source_failed")
+
+This ends that failed proposal source and records why; it does not repair the
+bad input or prove that ending an entire task would be appropriate. A child
+can return the failure to the episode responsible for changing its approach.
+Other failures retained the failure-leaf path.
+
+A separate mistake concerned what those failure leaves did to continuation.
+value is a credit result with an evaluated flag; previous is the last observed
+score; _qualities updates credit components and _score reads their current total.
+ResearchStep carries stop, score, gain, evaluated and reason in that order.
+A controller had previously handled unevaluated work like this:
+
+    if not value.evaluated:
+        self.failures += 1
+        return ResearchStep(False, previous, 0.0, False, "failed_observation")
+
+A later version incremented failures but then reached the same history append
+as successful work:
+
+    previous = self.history[-1]
+    score = self._score()
+    if not value.evaluated:
+        self.failures += 1
+    else:
+        self._qualities(value)
+        score = self._score()
+    self.history.append(score)
+
+With no shared progress change, repeated preserved scores mean zero gain. One
+recorded child had four failed provider responses and this history:
+
+    score history: [1819, 1819, 1819, 1819, 1819]
+    failed observations: 4
+    window size: 4
+    recent gain: 0
+    gain threshold: approximately 0.025
+    termination: yield_stop
+
+The numerical estimator compares recent gain with its configured threshold.
+It does not compare alternative actions. These failures were enough to stop
+this child as saturated, although no successful proposal demonstrated that
+available work was unproductive. Preserving credit did not preserve continuation.
+A longer root window changes the horizon, not this classification mistake.
+The intended failure policy must be established explicitly.
+
+The provider wrapper also discarded the underlying failure detail. It selected
+these stream event types:
+
+    kind in {"response.failed", "response.incomplete"}
+
+kind is the event's type. The wrapper raised ProviderError with a generic
+message plus kind, leaving the event's underlying error fields out of the
+exception. The retained information was the exception category and failure-event
+type, rather than the provider's explanation of the failure.
+
+The retained exception establishes an unsuccessful provider response. It does
+not identify exhausted credits, timeout, memory exhaustion or a particular HTTP
+status. Distinguish what happened to the request from what the controller later
+did with its failure. Missing diagnostic information is not permission to invent
+an explanation or silently change retry policy.
+
+
+REMOVING A REVIEW REQUIRES REMOVING ITS CONTRACT FROM CONSUMERS
+===============================================================
+
+An input record used to contain a scientific review. That review was removed.
+New records instead retained the evidence used to produce the value directly:
+
+    review = {}
+
+The new record's review field receives that empty dictionary. Its derivation
+field separately retains source_evidence_ids: the identities of the evidence
+records used to obtain the value. For example, a record can contain
+{"review":{},"derivation":{"source_evidence_ids":["evidence-A"]}}. Those identities
+point to data records held by the same program; this illustration defines the
+record shape without assuming another document. A downstream projection
+still demanded the deleted structure:
+
+    references = {key for criterion in assessment["review"]["criteria"].values()
+                  for key in criterion["evidence"]}
+
+For review={}, indexing "criteria" necessarily raises KeyError. In an actual
+execution, two required values had been found and credit had reached 14.5 before
+final report construction failed with KeyError: 'criteria'. Registration had
+succeeded; reporting could not project its new record shape. The failure does
+not establish that those values or their earned credit were rolled back.
+
+assessment is the input record; evidence is its dictionary of retained evidence
+records; identity computes each record's stored identity. Historical criteria
+listed which evidence records they used. The corrected projection tolerates those
+historical entries when present and uses explicit origin identities for new inputs:
+
+    review = assessment.get("review", {})
+    references = {key for criterion in review.get("criteria", {}).values()
+                  for key in criterion.get("evidence", ())}
+    source_ids = set(assessment.get("derivation", {}).get("source_evidence_ids", ()))
+    return {key: item for key, item in assessment.get("evidence", {}).items()
+            if key in references or identity(item) in source_ids}
+
+Restoring a fictitious review would conceal the producer/consumer mismatch.
+
+Another leftover consumer did not crash; it misreported state. Its verdict
+lookup was:
+
+    verdict = row.get("review", {}).get("verdict")
+
+The status field then used this expression:
+
+    ("reviewed_usable" if verdict in {"supported", "provisional"} else
+     "recorded_unassessed" if verdict == "unassessed" else
+     "recorded_unsupported" if verdict == "unsupported" else "contradicted")
+
+A missing verdict is None and falls into contradicted. Recorded events showed
+this label alongside successful discovery credit. That demonstrates a wrong
+display default, not a scientific contradiction. No consumer of this emitted
+label was established to block calculation or alter continuation. The provenance
+crash was corrected; this display default remained a defect. It must not be
+reported as fixed merely because the crashing consumer was repaired. A repair
+must project the actual found/computed state; a missing deleted review cannot
+establish contradiction. No additional implemented status correction is claimed
+here. A crash, a misleading label and a numerical gate require different causal
+explanations.
+
+
+CLOSED HISTORY: ARCHIVE AFTER COMMIT, RETAIN ACTIVE DECISION STATE
+================================================================
+
+A parent operation record retained the child's full result and recursive
+operation history. Closed descendants therefore remained reachable from root,
+although later decisions needed committed inputs, outputs and a typed return,
+rather than every nested audit event.
+
+records contains the parent's completed-action records; acquired is the returned
+child work; _append_record adds that action record; on_unit is the commit callback.
+The original loop committed the parent action and retained the whole child:
+
+    _, unit_view, contribution = self._append_record(
+        ctx, scope, records, item.label, acquired
+    )
+    if self.on_unit is not None:
+        self.on_unit(item, contribution, unit_view)
+    step = unit_view.controller_step
+
+The replacement inserted archiving after the commit callback:
+
+    if self.on_unit is not None:
+        self.on_unit(item, contribution, unit_view)
+    self._archive_completed_child(ctx, records)
+    del acquired, item, _
+
+archive_record writes an object to durable storage and returns a lightweight
+handle. child.archived keeps that handle and drops the expanded closed history;
+replace rebuilds the parent action record with those handles. _child_updates is
+the runtime's retained child-update map. The handoff used:
+
+    record = records[-1]
+    if self.archive_record is None or record.child is None:
+        return
+    child = record.child.archived(self.archive_record)
+    result = self.archive_record(record.child_result)
+    records[-1] = replace(record, child=child, child_result=result)
+    ctx._child_updates.pop(record.child.path, None)
+
+Ordering matters: the parent commit succeeds before closed history is replaced.
+The parent's usable report and authoritative current values remain. Archiving
+is not a license to delete active dependencies or provenance. Credit refresh
+and continuation should continue to read their designated live state.
+
+A related change replaced hashing one complete serialized string and byte copy
+with incremental hashing:
+
+    digest = hashlib.sha256()
+    for chunk in iter_json(value, canonical=True, normalize_nonfinite=False):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
+
+iter_json yields serialization chunks; digest.update adds each chunk to the hash.
+This avoids materializing one complete serialization string and its byte copy.
+The changes establish a shorter object lifetime and less eager serialization.
+Disk representation sizes do not establish measured resident-memory savings.
+Neither code inspection nor a large archive proves that an operating-system
+memory killer caused a particular process to stop.
+
+
+TERMINATION, NUMERICAL COVERAGE AND TASK SUCCESS ARE DIFFERENT FACTS
+==================================================================
+
+One execution simultaneously recorded:
+
+    durable checkpoint: complete
+    root termination: yield_stop
+    numerical estimator outcome: saturated
+    found inputs: 19 of 19
+    requested numerical outputs: 48 of 48
+    requested and intermediate steps current: 96 of 96
+    report passed: false
+    report status: partial_estimates_available
+
+There is no contradiction until the meaning of each field is established.
+Checkpoint completion means durable recording finished. Saturation means the
+configured recent-gain condition stopped the episode. Numerical coverage means
+the requested outputs exist. Report acceptance can impose additional conditions.
+
+The report's data dictionary holds the output tables. cls constructs a report
+with a boolean passed field. complete is its coverage/coherence result;
+acceptance["passed"] is the conjunction of additional acceptance conditions.
+The report was constructed with this expression:
+
+    return cls(complete and acceptance["passed"], data)
+
+It then used this exit decision:
+
+    return 0 if report.passed else 1
+
+The remaining acceptance checks required an inversion from observed infection
+outcomes, required that inversion's result in target-output ancestry, and
+required positive support scores. Inversion means deriving an infectious-dose
+parameter from observed infection counts; finding a published value for that
+parameter is a different operation. Thus an execution could have all requested
+numbers without satisfying those extra conditions.
+
+Some retained support checks also depended on scores whose review producer had
+been removed. New records set that score to zero. A decisive retained check was:
+
+    all(e["current_metric_support"].get(name, 0) > 0 and
+        name in e["current_computed_metrics"] for name in metrics)
+
+metrics is the requested set of output names; e is a result table for one set of
+inputs. current_computed_metrics lists its current outputs; current_metric_support
+maps each name to its additional support score. If every requested output exists
+but its score is 0, the first condition is false and this check fails. That is a
+different condition from whether arithmetic produced all 48 numbers. This is a concrete reason to
+trace removal through completion consumers. It does not establish that every
+remaining acceptance condition was authorized, nor that every one should be
+removed. The checks also contributed to episode-visible progress; they were
+not all confined to final reporting. No specific decision caused by that
+information was established.
+
+A truthful status states the independently established facts: all 48 numerical
+outputs were current; root stopped on its numerical yield rule; additional
+acceptance checks failed; the program exited unsuccessfully. Calling this simply
+"completed successfully" hides the failed contract. Saying it "produced no
+results" hides the actual work. Explaining the exact conditions is the audit.
+
+
+HOW TO PERFORM AND WRITE THE AUDIT
+===================================
+
+1. State the requested task and exact rules authorizing the behavior under review.
+2. Identify the episode or component that owns each decision.
+3. Follow one contribution from selected action through execution, recording,
+   parent information, credit projection, observation and continuation.
+4. Include the decisive code and define its inputs and helpers. Explain each
+   state change in order. A filename or an identifier is not an explanation.
+5. Include concrete initial records and resulting records. Label illustrative
+   inputs separately from observations of actual execution.
+6. Compare all affected consumers, including reporting and final acceptance.
+7. Propose the smallest coherent correction. An unresolved question does not
+   authorize a new restriction or a speculative repair.
+8. State what evidence would verify the correction and what has actually been done.
+
+Required fields for each finding
+---------------------------------
+
+Requirement: quote or state the authorized behavior completely.
+Owner: identify the episode or component responsible for the decision.
+Trigger: state the exact input, state, configuration or exception.
+Procedure: include the decisive code and define the information it consumes.
+State effect: explain what is added, selected, replaced, retained or invalidated.
+Communication effect: state exactly what the responsible episode receives.
+Credit effect: show which contribution changes and by how much, if established.
+Controller effect: explain any change to observations, continuation or termination.
+Observed evidence: include the relevant recorded fields, or state that no actual
+  occurrence has been established. Do not substitute a log location for evidence.
+Correction: describe the smallest coherent change across affected consumers.
+Verification: separate completed checks from proposed checks and remaining unknowns.
+
+Conclude with three sections
+-----------------------------
+
+Verified defects
+  Give the actual triggering conditions and causal effects established by code
+  or included execution evidence. A code-level defect need not have an observed
+  occurrence, but that limit must be explicit.
+
+Unresolved questions
+  State exactly what evidence or authority is missing. Do not turn an unanswered
+  question into a new gate, review, retry, cutoff or stopping rule.
+
+Mechanisms checked and working correctly
+  Identify the specific paths and behavior verified. Preserve them while correcting
+  the actual defect. Do not claim whole-system correctness from a narrow check.
+
+The finished audit must carry its reasoning: situation, inputs, code, transitions
+and consequences. Its reader should not need another document or a private
+conversation to understand a finding.

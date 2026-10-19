@@ -1,6 +1,6 @@
-"""Read-only projections of runtime acquisition and calibration provenance."""
+"""Read-only calibration provenance used by the existing credit projection."""
 
-from ...task_executors.scenario_metrics.evaluate import DEFAULT_METRICS, exposure_outputs_agree, output_meets_contract
+from ...task_executors.scenario_metrics.evaluate import exposure_outputs_agree, output_meets_contract
 from .records import cited_assessment_evidence, current_computation, current_premises, current_support, identity, Ledger
 
 
@@ -108,7 +108,7 @@ def calibration_progress(result):
 
 
 def target_calibration_progress(result, metrics, *, calibration=None):
-    """Use one lineage projection for parent steering, credit and completion."""
+    """Project existing calibration lineage for the calibration credit component."""
     progress = calibration if calibration is not None else calibration_progress(result)
     calibrated = {key: row for row in progress["calibrations"]
                   if row["outbreak_evidence_acquired"] and row["current"] for key in row["output_fact_keys"]}
@@ -145,34 +145,3 @@ def target_calibration_progress(result, metrics, *, calibration=None):
             "coherent_calibrated_solution_available": any(a["coherent_calibrated_solution"] for a in alternatives),
             "supported_coherent_calibrated_solution_available": any(a["supported_coherent_calibrated_solution"] for a in alternatives)}
     return targets
-
-
-def live_acceptance(result, run, scenarios):
-    progress = calibration_progress(result)
-    targets = target_calibration_progress(result, DEFAULT_METRICS, calibration=progress)
-    admitted = [*(f.as_record() for f in result.facts if f.kind.startswith("source_")), *result.evidence]
-    source_refs = sorted({row["source"] for row in admitted
-        if row["source"] in run.documents
-        and row["source_version"] in run.documents[row["source"]].get("versions", {})
-        and row["quote"] and row["quote"] in run.documents[row["source"]]["versions"][row["source_version"]]["text"]})
-    events = run.provider_events
-    checks = {
-        "required_quantity_contract": set(run.metrics) == set(DEFAULT_METRICS),
-        "real_search": any(e["operation"] == "search" and e["status"] == "completed" for e in events),
-        "search_page_proposer": any(e["operation"] == "select_page" and e.get("binding") == "SearchPageProposer" for e in events),
-        "real_retrieval": any(e["operation"] == "retrieve" and e["status"] == "completed" for e in events),
-        "llm_extraction": any(a["operation"] == "extract_research_evidence" and a.get("response")
-            and a["request"].get("source") in run.documents for a in run.model_attempts),
-        "span_checked_admission": bool(source_refs),
-        "outbreak_calibration": progress["outbreak_calibration_performed"],
-        "calibration_used_in_target_outputs": bool(targets) and all(
-            target["coherent_calibrated_solution_available"] for target in targets.values()),
-        "supported_three_quantity_coverage": bool(scenarios) and all(
-            scenario["complete_parameterization_available"] for scenario in scenarios.values()),
-        "supported_calibrated_three_quantity_coverage": bool(targets) and all(
-            target["supported_coherent_calibrated_solution_available"] for target in targets.values()),
-        "provider_available": run.provider_unavailable is None,
-    }
-    return {"passed": all(checks.values()), "checks": checks,
-            "missing": [name for name, passed in checks.items() if not passed],
-            "source_refs": source_refs, "calibration": progress, "target_calibration_links": targets}
